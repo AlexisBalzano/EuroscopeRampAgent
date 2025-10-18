@@ -9,6 +9,8 @@
 using namespace EuroScopePlugIn;
 
 namespace rampAgent {
+	constexpr const char* RAMPAGENT_VERSION = "v0.0.1";
+
 	struct Stand {
 		std::string name;
 		std::string icao;
@@ -25,6 +27,7 @@ namespace rampAgent {
 	public:
 		// Plugin lifecycle methods
 		void Initialize();
+		std::pair<bool, std::string> newVersionAvailable();
 		void Shutdown();
 		void Reset();
 
