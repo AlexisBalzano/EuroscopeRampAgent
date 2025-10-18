@@ -1,11 +1,17 @@
 #include <numeric>
+#include <algorithm>
+#include <limits>
+#include <cctype>
 #include <httplib.h>
 
 #include "RampAgent.h"
 #include "version.h"
+#include "core/TagItem.h"
 
 using namespace rampAgent;
 using namespace EuroScopePlugIn;
+
+rampAgent::RampAgent* rampAgent::myPluginInstance = nullptr;
 
 RampAgent::RampAgent() : CPlugIn(EuroScopePlugIn::COMPATIBILITY_CODE, "RampAgent", PLUGIN_VERSION, "French vACC", "Open Source"), m_stop(false)
 {
@@ -16,7 +22,6 @@ RampAgent::~RampAgent()
 	Shutdown();
 };
 
-RampAgent* myPluginInstance = nullptr;
 
 void __declspec (dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance)
 {
@@ -26,7 +31,6 @@ void __declspec (dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlu
 
 void __declspec (dllexport) EuroScopePlugInExit()
 {
-	// delete the instance
 	delete myPluginInstance;
 }
 
@@ -43,6 +47,7 @@ void RampAgent::Initialize()
 	{
 		initialized_ = true;
 		//TODO: Register tag items, commands, etc.
+		RegisterTagItems();
 
 		isConnected_ = isConnected();
 		canSendReport_ = isController();

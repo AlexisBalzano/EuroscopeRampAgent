@@ -9,6 +9,11 @@
 using namespace EuroScopePlugIn;
 
 namespace rampAgent {
+
+	class RampAgent;
+
+	extern RampAgent* myPluginInstance = nullptr;
+
 	constexpr const char* RAMPAGENT_VERSION = "v0.0.1";
 
 	struct Stand {
@@ -69,7 +74,7 @@ namespace rampAgent {
 		std::string menuICAO_ = "LFPG"; //default airport for stand menu
 
 		// Tag Items
-		//void RegisterTagItems();
+		void RegisterTagItems();
 		//void RegisterTagActions();
 		//void RegisterCommand();
 		//void unegisterCommand();
@@ -80,8 +85,9 @@ namespace rampAgent {
 		//void updateStandMenuButtons(const std::string& icao, const nlohmann::ordered_json& occupiedStands);
 
 		// TAG Items IDs
-		std::string standTagId_;
-		std::string standMenuId_;
-
+		enum class TagItemID {
+			TagItem_STAND = 0,
+			TagItem_MENU
+		};
 	};
 } // namespace rampAgent
