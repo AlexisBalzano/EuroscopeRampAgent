@@ -5,7 +5,6 @@ project(RampAgent VERSION "0.0.1")
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-#set(CMAKE_CXX_FLAGS "/Zc:wchar_t-")
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_compile_definitions(DIR_SEPARATOR="\\\\")
@@ -18,7 +17,6 @@ if(DEV)
     add_compile_definitions(DEV=1)
 endif()
 
-
 configure_file(
     ${CMAKE_SOURCE_DIR}/src/Version.h.in
     ${CMAKE_BINARY_DIR}/Version.h
@@ -26,9 +24,7 @@ configure_file(
 
 # set DEBUG mode
 if (DEBUG)
-    add_compile_definitions(
-        DEBUG=1
-    )
+    add_compile_definitions(DEBUG=1)
     message(STATUS "DEBUG mode enabled")
 endif()
 
@@ -44,40 +40,43 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # Source files
-# To set after starting development
 set(SOURCES
     src/RampAgent.cpp
 )
+
+# Define the plugin library (create target before using target_*
+add_library(${PROJECT_NAME} SHARED ${SOURCES})
+
+# Imported SDK lib
+add_library(EUROSCOPE_SDK STATIC IMPORTED)
+set_target_properties(EUROSCOPE_SDK PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/lib/EuroScopePlugInDll.lib"
+)
+
+# Target includes and definitions
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}/External/httplib
+    ${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/include
+)
+target_compile_definitions(${PROJECT_NAME} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # Link dependencies
 target_link_libraries(${PROJECT_NAME} PRIVATE 
     nlohmann_json::nlohmann_json
     OpenSSL::SSL
     OpenSSL::Crypto
+    EUROSCOPE_SDK
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/External/httplib)
-target_compile_definitions(${PROJECT_NAME} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-
-# Define the plugin library
-add_library(${PROJECT_NAME} SHARED ${SOURCES})
-add_library(EUROSCOPE_SDK STATIC IMPORTED)
-set_target_properties(EUROSCOPE_SDK PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/External/EuroscopeSDK/lib/EuroScopePlugInDll.lib"
-)
-target_link_libraries(${PROJECT_NAME} PRIVATE discord-rpc)
-target_link_libraries(${PROJECT_NAME} PRIVATE EUROSCOPE_SDK)
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/include)
-
-# Set output directory and properties
+# Output dirs and properties
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    PREFIX ""  # Remove "lib" prefix on Unix-like systems
+    PREFIX ""
 )
 
-# Add processor-specific output name for Apple platforms
+# Apple-specific output name
 if(${CMAKE_HOST_APPLE})
     set_target_properties(${PROJECT_NAME} PROPERTIES
         OUTPUT_NAME ${PROJECT_NAME}-${CMAKE_HOST_SYSTEM_PROCESSOR}
