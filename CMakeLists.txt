@@ -1,10 +1,37 @@
 cmake_minimum_required(VERSION 3.14)
 set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake)
+SET(VCPKG_TARGET_TRIPLET "x86-windows-static" CACHE STRING "")
 project(RampAgent VERSION "0.0.1")
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Use static runtime libraries
+SET(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+IF (MSVC)
+    IF (CMAKE_CXX_FLAGS MATCHES "/W[0-4]")
+        STRING(REGEX REPLACE "/W[0-4]" "/W4" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    ELSE ()
+        SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
+    ENDIF ()
+    IF (NOT CMAKE_CXX_FLAGS MATCHES "/MP")
+        SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
+        SET(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} /MP")
+    ENDIF ()
+
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /sdl /permissive- /DNOMINMAX")
+    SET(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} /sdl /permissive- /DNOMINMAX")
+    SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /MANIFESTUAC:NO /ignore:4099")
+    ADD_DEFINITIONS(/D_USRDLL)
+
+    FOREACH(flag_var CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE)
+        IF(${flag_var} MATCHES "/MD")
+            STRING(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+        ENDIF()
+    ENDFOREACH()
+ENDIF ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_compile_definitions(DIR_SEPARATOR="\\\\")
@@ -35,9 +62,6 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# Find external dependencies
-find_package(nlohmann_json CONFIG REQUIRED)
-find_package(OpenSSL REQUIRED)
 
 # Source files
 set(SOURCES
@@ -47,11 +71,32 @@ set(SOURCES
 # Define the plugin library (create target before using target_*
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
 
-# Imported SDK lib
-add_library(EUROSCOPE_SDK STATIC IMPORTED)
-set_target_properties(EUROSCOPE_SDK PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/lib/EuroScopePlugInDll.lib"
+# Find external dependencies
+FIND_PACKAGE(nlohmann_json CONFIG REQUIRED)
+FIND_PACKAGE(OpenSSL CONFIG REQUIRED)
+
+ADD_DEFINITIONS(
+    -D_CRT_SECURE_NO_WARNINGS
+    -DWIN32_LEAN_AND_MEAN
 )
+
+# --- EuroScope SDK Prebuilt Library ---
+set(EUROSCOPE_LIB "${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/lib/EuroScopePlugInDLL.lib")
+
+if(NOT EXISTS "${EUROSCOPE_LIB}")
+    message(FATAL_ERROR "EuroScopePlugInDLL.lib not found at ${EUROSCOPE_LIB}")
+endif()
+
+add_library(EuroScopePluginDLL STATIC IMPORTED)
+set_target_properties(EuroScopePluginDLL PROPERTIES
+    IMPORTED_LOCATION "${EUROSCOPE_LIB}"
+)
+
+target_include_directories(EuroScopePluginDLL INTERFACE
+    "${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/include"
+)
+
+
 
 # Target includes and definitions
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -60,12 +105,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 target_compile_definitions(${PROJECT_NAME} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 
-# Link dependencies
-target_link_libraries(${PROJECT_NAME} PRIVATE 
+
+target_include_directories(RampAgent PRIVATE ${CMAKE_SOURCE_DIR}/External/httplib)
+
+
+TARGET_LINK_LIBRARIES(${PROJECT_NAME} PRIVATE
+    EuroScopePluginDLL
+    OpenSSL::SSL OpenSSL::Crypto
     nlohmann_json::nlohmann_json
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    EUROSCOPE_SDK
+    crypt32.lib ws2_32.lib Shlwapi.lib
 )
 
 # Output dirs and properties

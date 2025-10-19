@@ -47,10 +47,11 @@ void RampAgent::Initialize()
 	{
 		initialized_ = true;
 		//TODO: Register tag items, commands, etc.
-		RegisterTagItems();
+		//RegisterTagItems();
 
-		isConnected_ = isConnected();
-		canSendReport_ = isController();
+		// FIXME: make euroscope crash
+		//isConnected_ = isConnected();
+		//canSendReport_ = isController();
 	}
 	catch (const std::exception& e)
 	{
