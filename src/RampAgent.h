@@ -12,7 +12,7 @@ namespace rampAgent {
 
 	class RampAgent;
 
-	extern RampAgent* myPluginInstance = nullptr;
+	extern RampAgent* myPluginInstance;
 
 	constexpr const char* RAMPAGENT_VERSION = "v0.0.1";
 
