@@ -14,6 +14,7 @@ namespace rampAgent {
 	extern RampAgent* myPluginInstance;
 
 	constexpr const char* RAMPAGENT_VERSION = "v0.0.1";
+	constexpr const char* RAMPAGENT_API = ""; //FIXME: Add default API URL here
 
 	struct Stand {
 		std::string name;
@@ -42,13 +43,16 @@ namespace rampAgent {
 		void OnTimer(int Counter);
 		// void OnFsdConnectionStateChange(const Fsd::FsdConnectionStateChangeEvent* event) override
 
-		//std::string toUpper(std::string str);
-		//void generateReport(nlohmann::ordered_json& reportJson);
+		std::string toUpper(std::string str);
+		void generateReport(nlohmann::ordered_json& reportJson);
 		//nlohmann::ordered_json sendReport();
 		//nlohmann::ordered_json getAllOccupiedStands(); //used to update tags when not sending reports
 		//nlohmann::ordered_json getAllBlockedStands();
-		//std::string getMenuICAO() const { return menuICAO_; }
-		//std::string changeMenuICAO(const std::string& newICAO) { menuICAO_ = newICAO; return menuICAO_; }
+		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
+		bool dumpReportToLogFile();
+		std::string getMenuICAO() const { return menuICAO_; }
+		std::string changeMenuICAO(const std::string& newICAO) { menuICAO_ = newICAO; return menuICAO_; }
+		void changeApiUrl(const std::string& newUrl) { apiUrl_ = newUrl; }
 
 
 	public:
@@ -70,13 +74,17 @@ namespace rampAgent {
 		std::thread m_thread;
 		bool canSendReport_ = false;
 		bool isConnected_ = false;
+		bool printError = true;
 		std::string menuICAO_ = "LFPG"; //default airport for stand menu
+		std::map<std::string, std::string> lastStandTagMap_; // maps callsign to stand tag ID
+		std::string apiUrl_ = RAMPAGENT_API;
+		nlohmann::ordered_json lastReportJson_;
+		std::string callsign_;
 
 		// Tag Items
 		void RegisterTagItems();
-		//void RegisterTagActions();
-		//void RegisterCommand();
-		//void unegisterCommand();
+		void RegisterTagActions();
+		bool OnCompileCommand(const char* sCommandLine);
 		//void OnTagAction(const Tag::TagActionEvent* event) override;
 		//void OnTagDropdownAction(const Tag::DropdownActionEvent* event) override;
 		//void UpdateTagItems();
@@ -86,7 +94,11 @@ namespace rampAgent {
 		// TAG Items IDs
 		enum class TagItemID {
 			TagItem_STAND = 0,
-			TagItem_MENU
+			TagItem_REMARK,
+		};
+
+		enum class TagActionID {
+			TagAction_OpenMENU = 0,
 		};
 	};
 } // namespace rampAgent
