@@ -60,6 +60,7 @@ void RampAgent::Initialize()
 	}
 	m_stop = false;
 	DisplayMessage("Ramp Agent initialized successfully", "Status");
+	DisplayMessage("Remember to use .rampAgent connect once connected to network", "");
 }
 
 std::pair<bool, std::string> rampAgent::RampAgent::newVersionAvailable()
@@ -126,12 +127,25 @@ void rampAgent::RampAgent::queueMessage(const std::string& message)
 }
 
 void RampAgent::runUpdate() {
+	if (!isConnected_) {
+		if (printError) {
+			printError = false; // avoid spamming logs
+			DisplayMessage("Not connected to FSD server. Cannot generate report.", "");
+		}
+		return;
+	}
+
 	generateReport(lastReportJson_); // generate the report using euroscopeSDK so synchronous with euroscope data
 
 	if (m_thread.joinable()) {
 		m_thread.join();
 	}
-	m_thread = std::thread(&RampAgent::sendReport, this); // Will send report asynchronously and generate assignedStands_ when done
+	if (canSendReport_) {
+		m_thread = std::thread(&RampAgent::sendReport, this); // Will send report asynchronously and generate assignedStands_ when done
+	}
+	else {
+		m_thread = std::thread(&RampAgent::getAllAssignedStands, this); // Will only update assignedStands_ without sending report
+	}
 
 	{
 		std::lock_guard<std::mutex> lock(messageQueueMutex_);
@@ -140,6 +154,63 @@ void RampAgent::runUpdate() {
 		}
 		messageQueue_.clear();
 	}
+
+	// AssignedStands_ is updated we can use it
+	std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+
+	if (assignedStands_.empty()) {
+		if (printError) {
+			printError = false; // avoid spamming logs
+			DisplayMessage("No occupied stands data received to update tags.", "");
+		}
+		// Clear All Tag Items
+		for (const auto& [callsign, standName] : lastStandTagMap_) {
+			//UpdateTagItems(callsign, WHITE, ""); //FIXME:
+		}
+		lastStandTagMap_.clear();
+		return;
+	}
+
+	//updateStandMenuButtons(menuICAO_, assignedStands);
+
+	std::map<std::string, std::string> standTagMap;
+
+	auto& assigned = assignedStands_["assignedStands"];
+	assignedStands_["assignedStands"].insert(
+		assignedStands_["assignedStands"].end(),
+		assignedStands_["occupiedStands"].begin(),
+		assignedStands_["occupiedStands"].end()
+	); // display tag item on occupied stands as well
+
+	for (auto& stand : assigned) {
+		std::string callsign = stand["callsign"].get<std::string>();
+		if (aircraftExists(callsign) == false) {
+			continue; // Aircraft not found, skip
+		}
+
+		std::string standName = stand["name"].get<std::string>();
+		standTagMap[callsign] = standName;
+
+		std::string remark = stand.value("remark", "");
+
+		// Update only if changed or new
+		if (lastStandTagMap_.find(callsign) != lastStandTagMap_.end() && lastStandTagMap_[callsign] == standName) {
+			//UpdateTagItems(callsign, WHITE, standName, remark);
+			continue;
+		}
+		else {
+			//UpdateTagItems(callsign, YELLOW, standName, remark);
+		}
+	}
+
+	// Clear tags for aircraft that are no longer assigned
+	for (const auto& [callsign, standName] : lastStandTagMap_) {
+		if (standTagMap.find(callsign) == standTagMap.end()) {
+			//UpdateTagItems(callsign, WHITE, "");
+		}
+	}
+
+	lastStandTagMap_ = standTagMap;
 }
 
 void RampAgent::OnTimer(int Counter) {
@@ -151,6 +222,18 @@ std::string RampAgent::toUpper(std::string str)
 	std::string result = str;
 	std::transform(result.begin(), result.end(), result.begin(), ::toupper);
 	return result;
+}
+
+bool rampAgent::RampAgent::aircraftExists(const std::string& callsign)
+{
+	CRadarTarget target = RadarTargetSelectFirst();
+	while (target.IsValid()) {
+		if (toUpper(target.GetCallsign()) == toUpper(callsign)) {
+			return true;
+		}
+		target = RadarTargetSelectNext(target);
+	}
+	return false;
 }
 
 std::vector<std::pair<CRadarTarget, CFlightPlan>> RampAgent::getAllAircraftsAndFP()
@@ -189,14 +272,6 @@ void RampAgent::generateReport(nlohmann::ordered_json& reportJson)
 		}
 	}
 
-
-	if (!isConnected_) {
-		if (printError) {
-			printError = false; // avoid spamming logs
-			DisplayMessage("Not connected to FSD server. Cannot send report.", "");
-		}
-		return;
-	}
 
 	reportJson["client"] = callsign_;
 	reportJson["aircrafts"]["onGround"] = nlohmann::ordered_json::object();
@@ -253,13 +328,13 @@ void RampAgent::sendReport()
 		queueMessage("Skipping report: no data to send.");
 		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 		assignedStands_ = nlohmann::ordered_json::object();
+		return;
 	}
 
 	httplib::SSLClient cli(apiUrl_, 443);
 	cli.set_connection_timeout(0, 700000); // 700ms
 	cli.set_read_timeout(1, 0);            // 1s
 	cli.set_write_timeout(1, 0);           // 1s
-	cli.set_keep_alive(false);             // don't hold sockets open
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 
 
@@ -270,11 +345,13 @@ void RampAgent::sendReport()
 		try {
 			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 			assignedStands_ = res->body.empty() ? nlohmann::ordered_json::object() : nlohmann::ordered_json::parse(res->body);
+			return;
 		}
 		catch (const std::exception& e) {
 			queueMessage("Failed to parse response from Ramp Agent server: " + std::string(e.what()));
 			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 			assignedStands_ = nlohmann::ordered_json::object();
+			return;
 		}
 	}
 	else {
@@ -282,16 +359,26 @@ void RampAgent::sendReport()
 			printError = false; // avoid spamming logs
 			queueMessage("Failed to send report to Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
 		}
+		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+		assignedStands_ = nlohmann::ordered_json::object();
+		return;
 	}
-	std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-	assignedStands_ = nlohmann::ordered_json::object();
+	
+	queueMessage("Unknown error");
+	{
+		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+		assignedStands_ = nlohmann::ordered_json::object();
+	}
 }
 
-nlohmann::ordered_json RampAgent::getAllAssignedStands()
+void RampAgent::getAllAssignedStands()
 {
-	nlohmann::ordered_json assignedStandsJson = nlohmann::ordered_json::object();
+	nlohmann::ordered_json response;
 
 	httplib::SSLClient cli(apiUrl_, 443);
+	cli.set_connection_timeout(0, 700000); // 700ms
+	cli.set_read_timeout(1, 0);            // 1s
+	cli.set_write_timeout(1, 0);           // 1s
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 
 	auto res = cli.Get("/api/occupancy/assigned", headers);
@@ -299,21 +386,27 @@ nlohmann::ordered_json RampAgent::getAllAssignedStands()
 	if (res && res->status >= 200 && res->status < 300) {
 		printError = true; // reset error printing flag on success
 		try {
-			if (!res->body.empty()) assignedStandsJson["assignedStands"] = nlohmann::ordered_json::parse(res->body);
-			return assignedStandsJson;
+			if (!res->body.empty()) response["assignedStands"] = nlohmann::ordered_json::parse(res->body);
+			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+			assignedStands_ = response;
+			return;
 		}
 		catch (const std::exception& e) {
-			DisplayMessage("Failed to parse occupied stands data from Ramp Agent server: " + std::string(e.what()), "");
-			return nlohmann::ordered_json::object();
+			queueMessage("Failed to parse occupied stands data from Ramp Agent server: " + std::string(e.what()));
+			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+			assignedStands_ = nlohmann::ordered_json::object();
+			return;
 		}
 	}
 	else {
 		if (printError) {
 			printError = false; // avoid spamming logs
-			DisplayMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0), "");
+			queueMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
 		}
 	}
-	return nlohmann::ordered_json::object();
+
+	std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+	assignedStands_ = nlohmann::ordered_json::object();
 }
 
 bool RampAgent::printToFile(const std::vector<std::string>& lines, const std::string& fileName)

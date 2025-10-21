@@ -45,10 +45,11 @@ namespace rampAgent {
 		void OnTimer(int Counter) override;
 
 		std::string toUpper(std::string str);
+		bool aircraftExists(const std::string& callsign);
 		std::vector<std::pair<CRadarTarget,CFlightPlan>> getAllAircraftsAndFP();
 		void generateReport(nlohmann::ordered_json& reportJson);
 		void sendReport();
-		nlohmann::ordered_json getAllAssignedStands(); //used to update tags when not sending reports
+		void getAllAssignedStands(); //used to update tags when not sending reports
 		std::string getMenuICAO() const { return menuICAO_; }
 		std::string changeMenuICAO(const std::string& newICAO) { menuICAO_ = newICAO; return menuICAO_; }
 		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
@@ -91,9 +92,9 @@ namespace rampAgent {
 		void RegisterTagItems();
 		void RegisterTagActions();
 		bool OnCompileCommand(const char* sCommandLine);
+		void UpdateTagItems(std::string Callsign, std::string standName = "", std::string remark = "");
 		//void OnTagAction(const Tag::TagActionEvent* event) override;
 		//void OnTagDropdownAction(const Tag::DropdownActionEvent* event) override;
-		void UpdateTagItems(std::string Callsign, std::string standName = "", std::string remark = "");
 		//void updateStandMenuButtons(const std::string& icao, const nlohmann::ordered_json& occupiedStands);
 
 		// TAG Items IDs

@@ -85,6 +85,9 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		isConnected_ = isConnected();
 		canSendReport_ = isController();
 		// FIXME: DEBUG
+#ifdef DEV
+		canSendReport_ = true; // Force connected in dev mode
+#endif // DEV
 		DisplayMessage(std::string("Connection status: ") + (isConnected_ ? "Connected" : "Not connected") +
 			", Role: " + (canSendReport_ ? "Controller" : "Observer") + ", Callsign: " + callsign_, "");
 		return true;
