@@ -77,7 +77,7 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 			return false;
 		}
 		changeApiUrl(url);
-		DisplayMessage("API URL set to " + url, "Cmd");
+		DisplayMessage("API URL set to " + url, "");
 		return true;
 	}
 	if (sub == "connect")

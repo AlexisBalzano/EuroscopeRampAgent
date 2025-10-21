@@ -61,7 +61,7 @@ void RampAgent::Initialize()
 	}
 	m_stop = false;
 	DisplayMessage("Ramp Agent initialized successfully", "Status");
-	DisplayMessage("Remember to use .rampAgent connect once connected to network", "");
+	DisplayMessage("Remember to use .rampAgent connect once connected to network and set API URL via .rampAgent url <url> command", "");
 }
 
 std::pair<bool, std::string> rampAgent::RampAgent::newVersionAvailable()
