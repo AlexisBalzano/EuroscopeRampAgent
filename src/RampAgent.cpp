@@ -53,6 +53,7 @@ void RampAgent::Initialize()
 	{
 		initialized_ = true;
 		RegisterTagItems();
+		RegisterTagActions();
 	}
 	catch (const std::exception& e)
 	{
@@ -165,15 +166,16 @@ void RampAgent::runUpdate() {
 		}
 		// Clear All Tag Items
 		for (const auto& [callsign, standName] : lastStandTagMap_) {
-			//UpdateTagItems(callsign, WHITE, ""); //FIXME:
+			UpdateTagItems(callsign, WHITE, "");
 		}
+		std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);
 		lastStandTagMap_.clear();
 		return;
 	}
 
 	//updateStandMenuButtons(menuICAO_, assignedStands);
 
-	std::map<std::string, std::string> standTagMap;
+	std::unordered_map<std::string, std::string> standTagMap;
 
 	auto& assigned = assignedStands_["assignedStands"];
 	assignedStands_["assignedStands"].insert(
@@ -195,21 +197,22 @@ void RampAgent::runUpdate() {
 
 		// Update only if changed or new
 		if (lastStandTagMap_.find(callsign) != lastStandTagMap_.end() && lastStandTagMap_[callsign] == standName) {
-			//UpdateTagItems(callsign, WHITE, standName, remark);
+			UpdateTagItems(callsign, WHITE, standName, remark);
 			continue;
 		}
 		else {
-			//UpdateTagItems(callsign, YELLOW, standName, remark);
+			UpdateTagItems(callsign, YELLOW, standName, remark);
 		}
 	}
 
 	// Clear tags for aircraft that are no longer assigned
 	for (const auto& [callsign, standName] : lastStandTagMap_) {
 		if (standTagMap.find(callsign) == standTagMap.end()) {
-			//UpdateTagItems(callsign, WHITE, "");
+			UpdateTagItems(callsign, WHITE, "");
 		}
 	}
 
+	std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);
 	lastStandTagMap_ = standTagMap;
 }
 
@@ -343,14 +346,18 @@ void RampAgent::sendReport()
 	if (res && res->status >= 200 && res->status < 300) {
 		printError = true; // reset error printing flag on success
 		try {
-			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-			assignedStands_ = res->body.empty() ? nlohmann::ordered_json::object() : nlohmann::ordered_json::parse(res->body);
+			{
+				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+				assignedStands_ = res->body.empty() ? nlohmann::ordered_json::object() : nlohmann::ordered_json::parse(res->body);
+			}
 			return;
 		}
 		catch (const std::exception& e) {
 			queueMessage("Failed to parse response from Ramp Agent server: " + std::string(e.what()));
-			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-			assignedStands_ = nlohmann::ordered_json::object();
+			{
+				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+				assignedStands_ = nlohmann::ordered_json::object();
+			}
 			return;
 		}
 	}
@@ -359,8 +366,10 @@ void RampAgent::sendReport()
 			printError = false; // avoid spamming logs
 			queueMessage("Failed to send report to Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
 		}
-		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-		assignedStands_ = nlohmann::ordered_json::object();
+		{
+			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+			assignedStands_ = nlohmann::ordered_json::object();
+		}
 		return;
 	}
 	
@@ -465,9 +474,9 @@ bool rampAgent::RampAgent::isController()
 	return !userIsObserver;
 }
 
-void rampAgent::RampAgent::sortStandList(std::vector<Stand>& standList)
+void rampAgent::RampAgent::sortStandList(std::vector<std::string>& standList)
 {
-	std::sort(standList.begin(), standList.end(), [](const Stand& a, const Stand& b) {
+	std::sort(standList.begin(), standList.end(), [](const std::string& a, const std::string& b) {
 		auto key = [](const std::string& s) {
 			size_t i = 0, n = s.size();
 
@@ -480,12 +489,10 @@ void rampAgent::RampAgent::sortStandList(std::vector<Stand>& standList)
 			while (i < n && std::isdigit(static_cast<unsigned char>(s[i]))) {
 				hasNum = true;
 				int digit = s[i] - '0';
-				if (num > ((std::numeric_limits<int>::max)() - digit) / 10) {
-					num = (std::numeric_limits<int>::max)(); // clamp on overflow
-				}
-				else {
+				if (num > ((std::numeric_limits<int>::max)() - digit) / 10)
+					num = (std::numeric_limits<int>::max)(); // clamp overflow
+				else
 					num = num * 10 + digit;
-				}
 				++i;
 			}
 
@@ -496,7 +503,7 @@ void rampAgent::RampAgent::sortStandList(std::vector<Stand>& standList)
 				++i;
 			}
 
-			// Remainder (for stable tie-breaking, case-insensitive)
+			// Remainder (case-insensitive)
 			std::string tailUpper;
 			tailUpper.reserve(n - i);
 			for (; i < n; ++i) {
@@ -504,24 +511,24 @@ void rampAgent::RampAgent::sortStandList(std::vector<Stand>& standList)
 				tailUpper.push_back(static_cast<char>(std::toupper(c)));
 			}
 
-			// Bare names (no numeric prefix) go to the end.
+			// Bare names (no numeric prefix) go to the end
 			return std::tuple<int, std::string, std::string, std::string>(
 				hasNum ? num : (std::numeric_limits<int>::max)(), letters, tailUpper, s
 			);
 			};
 
-		const auto [an, al, ar, as] = key(a.name);
-		const auto [bn, bl, br, bs] = key(b.name);
+		const auto [an, al, ar, as] = key(a);
+		const auto [bn, bl, br, bs] = key(b);
 
 		if (an != bn) return an < bn;
 
-		// If numbers equal, empty suffix (e.g., "2") comes before non-empty (e.g., "2A")
+		// If numbers equal, empty suffix (e.g., "2") comes before "2A"
 		if (al != bl) {
 			if (al.empty() != bl.empty()) return al.empty();
-			return al < bl; // case-insensitive compare via uppercased letters
+			return al < bl;
 		}
 
-		// Fallback to case-insensitive remainder, then original (stable) name
+		// Fallback: remainder, then original
 		if (ar != br) return ar < br;
 		return as < bs;
 		});

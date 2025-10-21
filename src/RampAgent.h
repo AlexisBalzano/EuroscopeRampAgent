@@ -17,10 +17,19 @@ namespace rampAgent {
 	constexpr const char* RAMPAGENT_VERSION = "v0.0.1";
 	constexpr const char* RAMPAGENT_API = ""; //FIXME: Add default API URL here
 
+	COLORREF WHITE = RGB(255, 255, 255);
+	COLORREF YELLOW = RGB(255, 220, 3);
+
 	struct Stand {
 		std::string name;
 		std::string icao;
 		bool occupied;
+	};
+
+	struct TagItemInfo {
+		std::string standName;
+		std::string remark;
+		COLORREF color;
 	};
 
 
@@ -55,6 +64,7 @@ namespace rampAgent {
 		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
 		bool dumpReportToLogFile();
 		void changeApiUrl(const std::string& newUrl) { apiUrl_ = newUrl; }
+		void assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao);
 
 
 	public:
@@ -66,7 +76,7 @@ namespace rampAgent {
 		void runUpdate();
 		bool isConnected();
 		bool isController();
-		void sortStandList(std::vector<Stand>& standList);
+		void sortStandList(std::vector<std::string>& standList);
 
 	private:
 		// Plugin state
@@ -77,7 +87,10 @@ namespace rampAgent {
 		bool isConnected_ = false;
 		bool printError = true;
 		std::string menuICAO_ = "LFPG"; //default airport for stand menu
-		std::map<std::string, std::string> lastStandTagMap_; // maps callsign to stand tag ID
+		std::unordered_map<std::string, std::string> lastStandTagMap_; // used to determine if new value
+		std::mutex lastStandTagMapMutex_;
+		std::unordered_map<std::string, TagItemInfo> tagItemValueMap_; // maps callsign to stand tag ID
+		std::mutex tagItemValueMapMutex_;
 		std::string apiUrl_ = RAMPAGENT_API;
 		nlohmann::ordered_json lastReportJson_;
 		std::mutex lastReportJsonMutex_;
@@ -86,25 +99,31 @@ namespace rampAgent {
 		std::mutex messageQueueMutex_;
 		nlohmann::ordered_json assignedStands_;
 		std::mutex assignedStandsMutex_;
+		std::string lastMenuICAO_;
+		std::vector<std::string> menuButtons_;
 
 
 		// Tag Items
 		void RegisterTagItems();
 		void RegisterTagActions();
 		bool OnCompileCommand(const char* sCommandLine);
-		void UpdateTagItems(std::string Callsign, std::string standName = "", std::string remark = "");
+		void UpdateTagItems(std::string Callsign, COLORREF color = WHITE, std::string standName = "", std::string remark = ""); // Update tag items map
+		void OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget, int ItemCode,
+			int TagData, char sItemString[16], int* pColorCode, COLORREF* pRGB, double* pFontSize) override; // Update euroscope Tag items
+		void OnFunctionCall(int functionId, const char* itemString, POINT pt, RECT area) override;
 		//void OnTagAction(const Tag::TagActionEvent* event) override;
 		//void OnTagDropdownAction(const Tag::DropdownActionEvent* event) override;
-		//void updateStandMenuButtons(const std::string& icao, const nlohmann::ordered_json& occupiedStands);
+		void updateStandMenuButtons(const std::string& icao);
 
 		// TAG Items IDs
 		enum class TagItemID {
-			TagItem_STAND = 0,
-			TagItem_REMARK,
+			STAND = 0,
+			REMARK,
 		};
 
 		enum class TagActionID {
-			TagAction_OpenMENU = 0,
+			OpenMENU = 0,
+			AssignSTAND,
 		};
 	};
 } // namespace rampAgent
