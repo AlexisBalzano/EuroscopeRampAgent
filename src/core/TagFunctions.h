@@ -27,7 +27,6 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 	case TagActionID::OpenMENU:
 	{
 		OpenPopupList(area, icao.c_str(), 1);
-		//TODO: dynamically add stands from assignedStands_ - occupied & blocked
 
 		updateStandMenuButtons(icao);
 
