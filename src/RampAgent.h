@@ -54,11 +54,13 @@ namespace rampAgent {
 		void OnTimer(int Counter) override;
 
 		std::string toUpper(std::string str);
-		bool aircraftExists(const std::string& callsign);
+		std::pair<bool, CRadarTarget> aircraftExists(const std::string& callsign);
 		std::vector<std::pair<CRadarTarget,CFlightPlan>> getAllAircraftsAndFP();
 		void generateReport(nlohmann::ordered_json& reportJson);
 		void sendReport();
 		void getAllAssignedStands(); //used to update tags when not sending reports
+
+		CFlightPlanControllerAssignedData getControllerAssignedData(const std::string callsign);
 		std::string getMenuICAO() const { return menuICAO_; }
 		std::string changeMenuICAO(const std::string& newICAO) { menuICAO_ = newICAO; return menuICAO_; }
 		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);

@@ -190,7 +190,7 @@ void RampAgent::runUpdate() {
 
 	for (auto& stand : assigned) {
 		std::string callsign = stand["callsign"].get<std::string>();
-		if (aircraftExists(callsign) == false) {
+		if (aircraftExists(callsign).first == false) {
 			continue; // Aircraft not found, skip
 		}
 
@@ -245,16 +245,16 @@ std::string RampAgent::toUpper(std::string str)
 	return result;
 }
 
-bool rampAgent::RampAgent::aircraftExists(const std::string& callsign)
+std::pair<bool, CRadarTarget> rampAgent::RampAgent::aircraftExists(const std::string& callsign)
 {
 	CRadarTarget target = RadarTargetSelectFirst();
 	while (target.IsValid()) {
 		if (toUpper(target.GetCallsign()) == toUpper(callsign)) {
-			return true;
+			return { true, target };
 		}
 		target = RadarTargetSelectNext(target);
 	}
-	return false;
+	return { false, CRadarTarget() };
 }
 
 std::vector<std::pair<CRadarTarget, CFlightPlan>> RampAgent::getAllAircraftsAndFP()
@@ -414,8 +414,11 @@ void RampAgent::getAllAssignedStands()
 		printError = true; // reset error printing flag on success
 		try {
 			if (!res->body.empty()) response["assignedStands"] = nlohmann::ordered_json::parse(res->body);
+			response["occupiedStands"] = nlohmann::ordered_json::array();
+			response["blockedStands"] = nlohmann::ordered_json::array();
 			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 			assignedStands_ = response;
+
 			return;
 		}
 		catch (const std::exception& e) {
@@ -434,6 +437,18 @@ void RampAgent::getAllAssignedStands()
 
 	std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 	assignedStands_ = nlohmann::ordered_json::object();
+}
+
+CFlightPlanControllerAssignedData rampAgent::RampAgent::getControllerAssignedData(const std::string callsign)
+{
+	CFlightPlan fp = FlightPlanSelectFirst();
+	while (fp.IsValid()) {
+		if (toUpper(fp.GetCallsign()) == toUpper(callsign)) {
+			return fp.GetControllerAssignedData();
+		}
+		fp = FlightPlanSelectNext(fp);
+	}
+	return CFlightPlanControllerAssignedData();
 }
 
 bool RampAgent::printToFile(const std::vector<std::string>& lines, const std::string& fileName)

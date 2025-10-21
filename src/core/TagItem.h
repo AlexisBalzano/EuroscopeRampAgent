@@ -43,6 +43,16 @@ inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, Eur
 			std::string standName = tagItemValueMap_[callsign].standName;
 			std::snprintf(sItemString, 16, "%s", standName.c_str());
 			*pRGB = tagItemValueMap_[callsign].color;
+
+			// Set sratchpad value for the stand to appear inside vSMR when aircraft is on ground (ie speed < 60kt)
+			std::pair<bool, CRadarTarget> aircraft = aircraftExists(callsign);
+
+			if (aircraft.first == false) break; // Aircraft not found, skip
+
+			if (aircraft.second.GetGS() > 60) break; // Aircraft is not on ground, skip
+
+			CFlightPlanControllerAssignedData assignedData = getControllerAssignedData(callsign);
+			assignedData.SetFlightStripAnnotation(3, standName.c_str());
 			break;
 		}
 		case TagItemID::REMARK:
