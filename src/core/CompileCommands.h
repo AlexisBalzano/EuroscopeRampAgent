@@ -80,8 +80,25 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		DisplayMessage("API URL set to " + url, "Cmd");
 		return true;
 	}
-	DisplayMessage("Commands: .ramp version / .ramp dump / .ramp menu <XXXX> / .ramp url <url>", "");
-	return false;
+	if (sub == "connect")
+	{
+		isConnected_ = isConnected();
+		canSendReport_ = isController();
+		// FIXME: DEBUG
+		DisplayMessage(std::string("Connection status: ") + (isConnected_ ? "Connected" : "Not connected") +
+			", Role: " + (canSendReport_ ? "Controller" : "Observer") + ", Callsign: " + callsign_, "");
+		return true;
+	}
+	if (sub == "disconnect")
+	{
+		isConnected_ = false;
+		canSendReport_ = false;
+		callsign_.clear();
+		DisplayMessage("Disconnected.");
+		return true;
+	}
+	DisplayMessage("Commands: .rampAgent version / .rampAgent connect / .rampAgent disconnect / .rampAgent dump / .rampAgent menu <XXXX> / .rampAgent url <url>", "");
+	return true;
 }
 
 } // namespace rampAgent

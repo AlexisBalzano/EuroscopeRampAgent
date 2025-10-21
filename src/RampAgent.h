@@ -4,6 +4,7 @@
 #include <thread>
 #include <string>
 #include <nlohmann/json.hpp>
+#include <mutex>
 
 using namespace EuroScopePlugIn;
 
@@ -38,20 +39,20 @@ namespace rampAgent {
 
 		// Radar commands
 		void DisplayMessage(const std::string& message, const std::string& sender = "");
+		void queueMessage(const std::string& message);
 
 		// Scope events
-		void OnTimer(int Counter);
-		// void OnFsdConnectionStateChange(const Fsd::FsdConnectionStateChangeEvent* event) override
+		void OnTimer(int Counter) override;
 
 		std::string toUpper(std::string str);
+		std::vector<std::pair<CRadarTarget,CFlightPlan>> getAllAircraftsAndFP();
 		void generateReport(nlohmann::ordered_json& reportJson);
-		//nlohmann::ordered_json sendReport();
-		//nlohmann::ordered_json getAllOccupiedStands(); //used to update tags when not sending reports
-		//nlohmann::ordered_json getAllBlockedStands();
-		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
-		bool dumpReportToLogFile();
+		void sendReport();
+		nlohmann::ordered_json getAllAssignedStands(); //used to update tags when not sending reports
 		std::string getMenuICAO() const { return menuICAO_; }
 		std::string changeMenuICAO(const std::string& newICAO) { menuICAO_ = newICAO; return menuICAO_; }
+		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
+		bool dumpReportToLogFile();
 		void changeApiUrl(const std::string& newUrl) { apiUrl_ = newUrl; }
 
 
@@ -62,7 +63,6 @@ namespace rampAgent {
 
 	private:
 		void runUpdate();
-		void run();
 		bool isConnected();
 		bool isController();
 		void sortStandList(std::vector<Stand>& standList);
@@ -79,7 +79,13 @@ namespace rampAgent {
 		std::map<std::string, std::string> lastStandTagMap_; // maps callsign to stand tag ID
 		std::string apiUrl_ = RAMPAGENT_API;
 		nlohmann::ordered_json lastReportJson_;
+		std::mutex lastReportJsonMutex_;
 		std::string callsign_;
+		std::vector<std::string> messageQueue_;
+		std::mutex messageQueueMutex_;
+		nlohmann::ordered_json assignedStands_;
+		std::mutex assignedStandsMutex_;
+
 
 		// Tag Items
 		void RegisterTagItems();
@@ -87,8 +93,7 @@ namespace rampAgent {
 		bool OnCompileCommand(const char* sCommandLine);
 		//void OnTagAction(const Tag::TagActionEvent* event) override;
 		//void OnTagDropdownAction(const Tag::DropdownActionEvent* event) override;
-		//void UpdateTagItems();
-		//void UpdateTagItems(std::string Callsign, std::string standName = "N/A");
+		void UpdateTagItems(std::string Callsign, std::string standName = "", std::string remark = "");
 		//void updateStandMenuButtons(const std::string& icao, const nlohmann::ordered_json& occupiedStands);
 
 		// TAG Items IDs
