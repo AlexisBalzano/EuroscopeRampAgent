@@ -39,7 +39,6 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 	}
 	case TagActionID::AssignSTAND:
 	{
-		DisplayMessage("Assigning stand: " + std::string(itemString) + " to " + callsign, "");
 		if (m_thread.joinable()) {
 			m_thread.join();
 		}
@@ -152,19 +151,25 @@ void RampAgent::assignStandToAircraft(const std::string& callsign, const std::st
 			nlohmann::ordered_json dataJson = nlohmann::ordered_json::parse(res->body);
 			if (!dataJson.contains("message")) return; // malformed response
 			if (dataJson["message"]["action"].get<std::string>() == "assign") {
-				queueMessage("Manual stand assignment successful: " + standName + " to " + callsign);
 				{
 					std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
 					lastStandTagMap_[callsign] = standName;
+				}
+				{
+					std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+					manualAssignedCallsigns_[callsign] = standName;
 				}
 				UpdateTagItems(callsign, WHITE, standName);
 				return;
 			}
 			else if (dataJson["message"]["action"].get<std::string>() == "free") {
-				queueMessage("Freed stand assignment for: " + callsign);
 				{
 					std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
 					lastStandTagMap_.erase(callsign);
+				}
+				{
+					std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+					manualAssignedCallsigns_[callsign] = "";
 				}
 				UpdateTagItems(callsign, WHITE, "");
 				return;

@@ -129,10 +129,6 @@ void rampAgent::RampAgent::queueMessage(const std::string& message)
 
 void RampAgent::runUpdate() {
 	if (!isConnected_) {
-		if (printError) {
-			printError = false; // avoid spamming logs
-			DisplayMessage("Not connected to FSD server. Cannot generate report.", "");
-		}
 		return;
 	}
 
@@ -157,15 +153,25 @@ void RampAgent::runUpdate() {
 	}
 
 	// AssignedStands_ is updated we can use it
-	std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+	nlohmann::ordered_json assignedStandsCopy;
+	{
+		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+		assignedStandsCopy = assignedStands_;
+	}
 
-	if (assignedStands_.empty()) {
+	std::unordered_map<std::string, std::string> lastStandTagMapCopy;
+	{
+		std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
+		lastStandTagMapCopy = lastStandTagMap_;
+	}
+
+	if (assignedStandsCopy.empty()) {
 		if (printError) {
 			printError = false; // avoid spamming logs
 			DisplayMessage("No occupied stands data received to update tags.", "");
 		}
 		// Clear All Tag Items
-		for (const auto& [callsign, standName] : lastStandTagMap_) {
+		for (const auto& [callsign, standName] : lastStandTagMapCopy) {
 			UpdateTagItems(callsign, WHITE, "");
 		}
 		std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);
@@ -173,15 +179,13 @@ void RampAgent::runUpdate() {
 		return;
 	}
 
-	//updateStandMenuButtons(menuICAO_, assignedStands);
-
 	std::unordered_map<std::string, std::string> standTagMap;
 
-	auto& assigned = assignedStands_["assignedStands"];
-	assignedStands_["assignedStands"].insert(
-		assignedStands_["assignedStands"].end(),
-		assignedStands_["occupiedStands"].begin(),
-		assignedStands_["occupiedStands"].end()
+	auto& assigned = assignedStandsCopy["assignedStands"];
+	assignedStandsCopy["assignedStands"].insert(
+		assignedStandsCopy["assignedStands"].end(),
+		assignedStandsCopy["occupiedStands"].begin(),
+		assignedStandsCopy["occupiedStands"].end()
 	); // display tag item on occupied stands as well
 
 	for (auto& stand : assigned) {
@@ -191,12 +195,20 @@ void RampAgent::runUpdate() {
 		}
 
 		std::string standName = stand["name"].get<std::string>();
+		
+		{
+			std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+			if (manualAssignedCallsigns_.find(callsign) != manualAssignedCallsigns_.end()) {
+				standName = manualAssignedCallsigns_[callsign];
+			}
+		}
+
 		standTagMap[callsign] = standName;
 
 		std::string remark = stand.value("remark", "");
 
 		// Update only if changed or new
-		if (lastStandTagMap_.find(callsign) != lastStandTagMap_.end() && lastStandTagMap_[callsign] == standName) {
+		if (lastStandTagMapCopy.find(callsign) != lastStandTagMapCopy.end() && lastStandTagMapCopy[callsign] == standName) {
 			UpdateTagItems(callsign, WHITE, standName, remark);
 			continue;
 		}
@@ -206,10 +218,16 @@ void RampAgent::runUpdate() {
 	}
 
 	// Clear tags for aircraft that are no longer assigned
-	for (const auto& [callsign, standName] : lastStandTagMap_) {
+	for (const auto& [callsign, standName] : lastStandTagMapCopy) {
 		if (standTagMap.find(callsign) == standTagMap.end()) {
 			UpdateTagItems(callsign, WHITE, "");
 		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+		manualAssignedCallsigns_.clear();
+		
 	}
 
 	std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);

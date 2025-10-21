@@ -101,6 +101,8 @@ namespace rampAgent {
 		std::mutex assignedStandsMutex_;
 		std::string lastMenuICAO_;
 		std::vector<std::string> menuButtons_;
+		std::unordered_map<std::string, std::string> manualAssignedCallsigns_;
+		std::mutex manualAssignedCallsignsMutex_;
 
 
 		// Tag Items
