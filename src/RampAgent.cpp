@@ -414,11 +414,33 @@ void RampAgent::getAllAssignedStands()
 		printError = true; // reset error printing flag on success
 		try {
 			if (!res->body.empty()) response["assignedStands"] = nlohmann::ordered_json::parse(res->body);
-			response["occupiedStands"] = nlohmann::ordered_json::array();
 			response["blockedStands"] = nlohmann::ordered_json::array();
+		}
+		catch (const std::exception& e) {
+			queueMessage("Failed to parse assigned stands data from Ramp Agent server: " + std::string(e.what()));
+			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+			assignedStands_ = nlohmann::ordered_json::object();
+			return;
+		}
+	}
+	else {
+		if (printError) {
+			printError = false; // avoid spamming logs
+			queueMessage("Failed to retrieve assigned stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
+		}
+		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+		assignedStands_ = nlohmann::ordered_json::object();
+		return;
+	}
+
+	res = cli.Get("/api/occupancy/occupied", headers);
+
+	if (res && res->status >= 200 && res->status < 300) {
+		printError = true; // reset error printing flag on success
+		try {
+			if (!res->body.empty()) response["occupiedStands"] = nlohmann::ordered_json::parse(res->body);
 			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 			assignedStands_ = response;
-
 			return;
 		}
 		catch (const std::exception& e) {
