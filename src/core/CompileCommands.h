@@ -53,20 +53,6 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		DisplayMessage(ok ? "Report dump written to logs/NeoRampAgent" : "Failed to write report dump", "");
 		return true;
 	}
-	if (sub == "menu")
-	{
-		std::string code;
-		iss >> code;
-		if (code.size() != 4)
-		{
-			DisplayMessage("Usage: .ramp menu <XXXX>", "");
-			return false;
-		}
-		std::transform(code.begin(), code.end(), code.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-		changeMenuICAO(code);
-		DisplayMessage("ICAO set to " + code, "");
-		return true;
-	}
 	if (sub == "url")
 	{
 		std::string url;
@@ -100,7 +86,7 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		DisplayMessage("Disconnected.");
 		return true;
 	}
-	DisplayMessage("Commands: .rampAgent version / .rampAgent connect / .rampAgent disconnect / .rampAgent dump / .rampAgent menu <XXXX> / .rampAgent url <url>", "");
+	DisplayMessage("Commands: .rampAgent version / .rampAgent connect / .rampAgent disconnect / .rampAgent dump / .rampAgent url <url>", "");
 	return true;
 }
 
