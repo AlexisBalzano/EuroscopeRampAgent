@@ -51,7 +51,6 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 
 inline void rampAgent::RampAgent::updateStandMenuButtons(const std::string& icao)
 {
-	if (lastMenuICAO_ == icao) return;
 	menuButtons_.clear();
 	nlohmann::ordered_json standsJson = nlohmann::ordered_json::object();
 
@@ -127,7 +126,6 @@ inline void rampAgent::RampAgent::updateStandMenuButtons(const std::string& icao
 	//Sort stands alphabetically -> 2A,2B, 3A,3B,...
 	sortStandList(availableStands);
 	menuButtons_ = availableStands;
-	lastMenuICAO_ = icao;
 }
 
 void RampAgent::assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao)
