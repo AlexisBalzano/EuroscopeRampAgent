@@ -43,9 +43,13 @@ jobs:
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
-      - name: Setup vcpkg
-        id: vcpkg
-        uses: microsoft/setup-vcpkg@v1
+      # Use the vcpkg preinstalled on windows-2022 runners to avoid the action resolution issue.
+      - name: Verify vcpkg is available
+        shell: pwsh
+        run: |
+          $vcpkg = 'C:\vcpkg\vcpkg.exe'
+          if (-not (Test-Path $vcpkg)) { Write-Error "vcpkg not found at $vcpkg"; exit 1 }
+          & $vcpkg version
 
       - name: Configure (CMake + Ninja)
         shell: pwsh
@@ -53,7 +57,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DVCPKG_TARGET_TRIPLET=x64-windows
-          -DCMAKE_TOOLCHAIN_FILE="${{ steps.vcpkg.outputs.vcpkgRoot }}\scripts\buildsystems\vcpkg.cmake"
+          -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
 
       - name: Build
         shell: pwsh
