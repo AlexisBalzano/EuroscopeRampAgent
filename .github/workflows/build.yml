@@ -1,0 +1,76 @@
+name: Build DLL (CMake + Ninja)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build on Windows (x64, Release)
+    runs-on: windows-2022
+    env:
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify AUTH_SECRET is set
+        shell: pwsh
+        run: |
+          if (-not $env:AUTH_SECRET) {
+            Write-Error "Missing repository secret 'AUTH_SECRET'. Add it in: Settings > Secrets and variables > Actions."
+            exit 1
+          }
+
+      - name: Setup CMake 3.31.6
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 3.31.6
+
+      - name: Setup MSVC Developer Command Prompt (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Setup vcpkg (x64-windows)
+        id: vcpkg
+        uses: microsoft/vcpkg-action@v1
+        with:
+          triplet: x64-windows
+
+      - name: Configure (CMake + Ninja)
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="${{ steps.vcpkg.outputs.vcpkgRoot }}\scripts\buildsystems\vcpkg.cmake"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests (if any)
+        shell: pwsh
+        continue-on-error: true
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Upload DLL artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dll-Release
+          if-no-files-found: warn
+          path: |
+            build/**/*.dll
+            build/**/Release/*.dll
+            build/**/*.pdb
