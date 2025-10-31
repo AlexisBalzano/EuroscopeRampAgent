@@ -64,7 +64,10 @@ inline void rampAgent::RampAgent::updateStandMenuButtons(const std::string& icao
 	auto res = cli.Get(apiEndpoint.c_str(), headers);
 
 	if (res && res->status >= 200 && res->status < 300) {
-		printError = true; // reset error printing flag on success
+		if (!printError) {
+			printError = true; // reset error printing flag on success
+			DisplayMessage("Successfully retrieved stands information from NeoRampAgent server for airport " + icao, "");
+		}
 		try {
 			if (!res->body.empty()) standsJson = nlohmann::ordered_json::parse(res->body);
 		}

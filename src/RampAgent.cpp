@@ -365,7 +365,10 @@ void RampAgent::sendReport()
 	auto res = cli.Post("/rampagent/api/report", headers, reportJson.dump(), "application/json");
 
 	if (res && res->status >= 200 && res->status < 300) {
-		printError = true; // reset error printing flag on success
+		if (!printError) {
+			printError = true; // reset error printing flag on success
+			queueMessage("Successfully reconnected to Ramp Agent server.");
+		}
 		try {
 			{
 				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
@@ -414,7 +417,10 @@ void RampAgent::getAllAssignedStands()
 	auto res = cli.Get("/rampagent/api/occupancy/assigned", headers);
 
 	if (res && res->status >= 200 && res->status < 300) {
-		printError = true; // reset error printing flag on success
+		if (!printError) {
+			printError = true; // reset error printing flag on success
+			queueMessage("Successfully reconnected to Ramp Agent server.");
+		}
 		try {
 			if (!res->body.empty()) response["assignedStands"] = nlohmann::ordered_json::parse(res->body);
 			response["blockedStands"] = nlohmann::ordered_json::array();
@@ -439,7 +445,10 @@ void RampAgent::getAllAssignedStands()
 	res = cli.Get("/rampagent/api/occupancy/occupied", headers);
 
 	if (res && res->status >= 200 && res->status < 300) {
-		printError = true; // reset error printing flag on success
+		if (!printError) {
+			printError = true; // reset error printing flag on success
+			queueMessage("Successfully reconnected to Ramp Agent server.");
+		}
 		try {
 			if (!res->body.empty()) response["occupiedStands"] = nlohmann::ordered_json::parse(res->body);
 			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
