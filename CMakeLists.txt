@@ -49,6 +49,15 @@ configure_file(
     ${CMAKE_BINARY_DIR}/Version.h
 )
 
+if(NOT DEFINED AUTH_SECRET)
+    set(AUTH_SECRET "")
+endif()
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/Secret.h.in
+    ${CMAKE_BINARY_DIR}/Secret.h
+    @ONLY
+)
+
 # set DEBUG mode
 if (DEBUG)
     add_compile_definitions(DEBUG=1)

@@ -5,12 +5,14 @@
 #include <httplib.h>
 #include <fstream>
 #include <filesystem>
+#include <openssl/sha.h>
 
 #include "RampAgent.h"
 #include "version.h"
 #include "core/TagItem.h"
 #include "core/CompileCommands.h"
 #include "core/TagFunctions.h"
+#include "Secret.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -295,6 +297,7 @@ void RampAgent::generateReport(nlohmann::ordered_json& reportJson)
 
 
 	reportJson["client"] = callsign_;
+	reportJson["token"] = generateToken(callsign_);
 	reportJson["aircrafts"]["onGround"] = nlohmann::ordered_json::object();
 	reportJson["aircrafts"]["airborne"] = nlohmann::ordered_json::object();
 
@@ -587,4 +590,17 @@ void rampAgent::RampAgent::sortStandList(std::vector<std::string>& standList)
 		if (ar != br) return ar < br;
 		return as < bs;
 		});
+}
+
+inline std::string rampAgent::RampAgent::generateToken(const std::string& callsign)
+{
+	std::string s = AUTH_SECRET + callsign_;
+	unsigned char hash[SHA256_DIGEST_LENGTH];
+	SHA256(reinterpret_cast<const unsigned char*>(s.data()), s.size(), hash);
+	std::ostringstream oss;
+	oss << std::hex << std::setfill('0');
+	for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+		oss << std::setw(2) << static_cast<int>(hash[i]);
+	}
+	return oss.str();
 }

@@ -65,6 +65,7 @@ namespace rampAgent {
 		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
 		bool dumpReportToLogFile();
 		void changeApiUrl(const std::string& newUrl) { apiUrl_ = newUrl; }
+		std::string generateToken(const std::string& callsign);
 		void assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao);
 
 

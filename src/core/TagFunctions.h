@@ -130,12 +130,14 @@ inline void rampAgent::RampAgent::updateStandMenuButtons(const std::string& icao
 
 void RampAgent::assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao)
 {
+	std::string token = generateToken(callsign_);
+
 	httplib::SSLClient cli(apiUrl_);
 	cli.set_connection_timeout(0, 700000); // 700ms
 	cli.set_read_timeout(1, 0);            // 1s
 	cli.set_write_timeout(1, 0);           // 1s
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
-	std::string apiEndpoint = "/rampagent/api/assign?stand=" + standName + "&icao=" + menuIcao + "&callsign=" + callsign;
+	std::string apiEndpoint = "/rampagent/api/assign?stand=" + standName + "&icao=" + menuIcao + "&callsign=" + callsign + "&token=" + token + "&client=" + callsign_;
 
 	auto res = cli.Get(apiEndpoint.c_str(), headers);
 
