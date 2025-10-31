@@ -43,17 +43,16 @@ jobs:
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
-      - name: Setup vcpkg (x64-windows)
+      - name: Setup vcpkg
         id: vcpkg
-        uses: microsoft/vcpkg-action@v1
-        with:
-          triplet: x64-windows
+        uses: microsoft/setup-vcpkg@v1
 
       - name: Configure (CMake + Ninja)
         shell: pwsh
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
+          -DVCPKG_TARGET_TRIPLET=x64-windows
           -DCMAKE_TOOLCHAIN_FILE="${{ steps.vcpkg.outputs.vcpkgRoot }}\scripts\buildsystems\vcpkg.cmake"
 
       - name: Build
