@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build on Windows (x64, Release)
+    name: Build on Windows (x86, Release)
     runs-on: windows-2022
     env:
       AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
@@ -35,15 +35,15 @@ jobs:
         with:
           cmakeVersion: 3.31.6
 
-      - name: Setup MSVC Developer Command Prompt (x64)
+      - name: Setup MSVC Developer Command Prompt (x86)
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: x86
 
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
-      # Use the vcpkg preinstalled on windows-2022 runners to avoid the action resolution issue.
+      # Use the vcpkg preinstalled on windows-2022 runners
       - name: Verify vcpkg is available
         shell: pwsh
         run: |
@@ -51,12 +51,12 @@ jobs:
           if (-not (Test-Path $vcpkg)) { Write-Error "vcpkg not found at $vcpkg"; exit 1 }
           & $vcpkg version
 
-      - name: Configure (CMake + Ninja)
+      - name: Configure (CMake + Ninja, x86)
         shell: pwsh
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
-          -DVCPKG_TARGET_TRIPLET=x64-windows
+          -DVCPKG_TARGET_TRIPLET=x86-windows
           -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
 
       - name: Build
@@ -71,9 +71,9 @@ jobs:
       - name: Upload DLL artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dll-Release
+          name: dll-Release-x86
           if-no-files-found: warn
           path: |
+            bin/*.dll
             build/**/*.dll
-            build/**/Release/*.dll
             build/**/*.pdb
