@@ -56,18 +56,11 @@ namespace rampAgent {
 		std::string toUpper(std::string str);
 		std::pair<bool, CRadarTarget> aircraftExists(const std::string& callsign);
 		std::vector<std::pair<CRadarTarget,CFlightPlan>> getAllAircraftsAndFP();
-		void generateReport(nlohmann::ordered_json& reportJson);
-		void sendReport();
-		void getAllAssignedStands(); //used to update tags when not sending reports
+		void getAllAssignedStands();
 		CFlightPlanControllerAssignedData getControllerAssignedData(const std::string callsign);
-		std::string getMenuICAO() const { return menuICAO_; }
-		std::string changeMenuICAO(const std::string& newICAO) { menuICAO_ = newICAO; return menuICAO_; }
-		bool printToFile(const std::vector<std::string>& lines, const std::string& fileName);
-		bool dumpReportToLogFile();
 		void changeApiUrl(const std::string& newUrl) { apiUrl_ = newUrl; }
 		std::string generateToken(const std::string& callsign);
 		void assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao);
-
 
 	public:
 		// Command IDs
@@ -85,17 +78,14 @@ namespace rampAgent {
 		bool initialized_ = false;
 		bool m_stop;
 		std::thread m_thread;
-		bool canSendReport_ = false;
+		bool isController_ = false;
 		bool isConnected_ = false;
 		bool printError = true;
-		std::string menuICAO_ = "LFPG"; //default airport for stand menu
 		std::unordered_map<std::string, std::string> lastStandTagMap_; // used to determine if new value
 		std::mutex lastStandTagMapMutex_;
 		std::unordered_map<std::string, TagItemInfo> tagItemValueMap_; // maps callsign to stand tag ID
 		std::mutex tagItemValueMapMutex_;
 		std::string apiUrl_ = RAMPAGENT_API;
-		nlohmann::ordered_json lastReportJson_;
-		std::mutex lastReportJsonMutex_;
 		std::string callsign_;
 		std::vector<std::string> messageQueue_;
 		std::mutex messageQueueMutex_;
@@ -114,8 +104,6 @@ namespace rampAgent {
 		void OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget, int ItemCode,
 			int TagData, char sItemString[16], int* pColorCode, COLORREF* pRGB, double* pFontSize) override; // Update euroscope Tag items
 		void OnFunctionCall(int functionId, const char* itemString, POINT pt, RECT area) override;
-		//void OnTagAction(const Tag::TagActionEvent* event) override;
-		//void OnTagDropdownAction(const Tag::DropdownActionEvent* event) override;
 		void updateStandMenuButtons(const std::string& icao);
 
 		// TAG Items IDs

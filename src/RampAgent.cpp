@@ -134,17 +134,11 @@ void RampAgent::runUpdate() {
 		return;
 	}
 
-	generateReport(lastReportJson_); // generate the report using euroscopeSDK so synchronous with euroscope data
 
 	if (m_thread.joinable()) {
 		m_thread.join();
 	}
-	if (canSendReport_) {
-		m_thread = std::thread(&RampAgent::sendReport, this); // Will send report asynchronously and generate assignedStands_ when done
-	}
-	else {
-		m_thread = std::thread(&RampAgent::getAllAssignedStands, this); // Will only update assignedStands_ without sending report
-	}
+	m_thread = std::thread(&RampAgent::getAllAssignedStands, this);
 
 	{
 		std::lock_guard<std::mutex> lock(messageQueueMutex_);
@@ -273,137 +267,6 @@ std::vector<std::pair<CRadarTarget, CFlightPlan>> RampAgent::getAllAircraftsAndF
 	return result;
 }
 
-void RampAgent::generateReport(nlohmann::ordered_json& reportJson)
-{
-	std::lock_guard<std::mutex> lock(lastReportJsonMutex_);
-	reportJson.clear();
-
-	// need to retrieve all aircraft in range and format json report
-	// Can make es crash since not used in the same block ?
-	std::vector<std::pair<CRadarTarget, CFlightPlan>> acFPs = getAllAircraftsAndFP();
-
-	// Filter for ground aircraft & Airborn aircrafts
-	std::vector<std::pair<CRadarTarget, CFlightPlan>> groundAircrafts;
-	std::vector<std::pair<CRadarTarget, CFlightPlan>> airbornAircrafts;
-	for (const auto& ac : acFPs) {
-		if (ac.first.GetGS() == 0) {
-			groundAircrafts.push_back(ac);
-		}
-		else {
-			if (ac.first.GetPosition().GetPressureAltitude() > 20000) continue; // Skip aircraft above 20,000 ft
-			airbornAircrafts.push_back(ac);
-		}
-	}
-
-
-	reportJson["client"] = callsign_;
-	reportJson["token"] = generateToken(callsign_);
-	reportJson["aircrafts"]["onGround"] = nlohmann::ordered_json::object();
-	reportJson["aircrafts"]["airborne"] = nlohmann::ordered_json::object();
-
-	for (const auto& ac : groundAircrafts) {
-		std::string callsign = toUpper(ac.first.GetCallsign());
-		std::string origin = "N/A";
-		std::string aircraftType = "ZZZZ";
-		if (ac.second.IsValid()) {
-			CFlightPlanData fp = ac.second.GetFlightPlanData();
-			origin = toUpper(fp.GetOrigin());
-			aircraftType = toUpper(fp.GetAircraftFPType());
-		}
-
-		reportJson["aircrafts"]["onGround"][callsign]["origin"] = origin;
-		reportJson["aircrafts"]["onGround"][callsign]["aircraftType"] = aircraftType;
-		reportJson["aircrafts"]["onGround"][callsign]["position"]["lat"] = ac.first.GetPosition().GetPosition().m_Latitude;
-		reportJson["aircrafts"]["onGround"][callsign]["position"]["lon"] = ac.first.GetPosition().GetPosition().m_Longitude;
-	}
-
-	for (const auto& ac : airbornAircrafts) {
-		std::string callsign = toUpper(ac.first.GetCallsign());
-		if (!ac.second.IsValid()) continue; // Skip if no flightplan found
-		CFlightPlanData fp = ac.second.GetFlightPlanData();
-		std::string dest = std::string(fp.GetDestination());
-		if (std::string(dest).substr(0, 2) != "LF") continue; // Skip if destination is not in France
-		std::string origin = "N/A";
-		std::string destination = "N/A";
-		std::string aircraftType = "ZZZZ";
-		origin = toUpper(fp.GetOrigin());
-		destination = toUpper(dest);
-		aircraftType = toUpper(fp.GetAircraftFPType());
-
-		reportJson["aircrafts"]["airborne"][callsign]["origin"] = origin;
-		reportJson["aircrafts"]["airborne"][callsign]["destination"] = destination;
-		reportJson["aircrafts"]["airborne"][callsign]["aircraftType"] = aircraftType;
-		reportJson["aircrafts"]["airborne"][callsign]["position"]["lat"] =ac.first.GetPosition().GetPosition().m_Latitude;
-		reportJson["aircrafts"]["airborne"][callsign]["position"]["lon"] =ac.first.GetPosition().GetPosition().m_Longitude;
-		reportJson["aircrafts"]["airborne"][callsign]["position"]["alt"] = ac.first.GetPosition().GetPressureAltitude();
-		reportJson["aircrafts"]["airborne"][callsign]["position"]["dist"] = ac.second.GetDistanceToDestination();
-	}
-}
-
-void RampAgent::sendReport()
-{
-	nlohmann::ordered_json reportJson;
-	{
-		std::lock_guard<std::mutex> lock(lastReportJsonMutex_);
-		reportJson = lastReportJson_;
-	}
-
-	if (reportJson.empty()) {
-		queueMessage("Skipping report: no data to send.");
-		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-		assignedStands_ = nlohmann::ordered_json::object();
-		return;
-	}
-
-	httplib::SSLClient cli(apiUrl_, 443);
-	cli.set_connection_timeout(0, 700000); // 700ms
-	cli.set_read_timeout(1, 0);            // 1s
-	cli.set_write_timeout(1, 0);           // 1s
-	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
-
-
-	auto res = cli.Post("/rampagent/api/report", headers, reportJson.dump(), "application/json");
-
-	if (res && res->status >= 200 && res->status < 300) {
-		if (!printError) {
-			printError = true; // reset error printing flag on success
-			queueMessage("Successfully reconnected to Ramp Agent server.");
-		}
-		try {
-			{
-				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-				assignedStands_ = res->body.empty() ? nlohmann::ordered_json::object() : nlohmann::ordered_json::parse(res->body);
-			}
-			return;
-		}
-		catch (const std::exception& e) {
-			queueMessage("Failed to parse response from Ramp Agent server: " + std::string(e.what()));
-			{
-				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-				assignedStands_ = nlohmann::ordered_json::object();
-			}
-			return;
-		}
-	}
-	else {
-		if (printError) {
-			printError = false; // avoid spamming logs
-			queueMessage("Failed to send report to Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
-		}
-		{
-			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-			assignedStands_ = nlohmann::ordered_json::object();
-		}
-		return;
-	}
-	
-	queueMessage("Unknown error");
-	{
-		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-		assignedStands_ = nlohmann::ordered_json::object();
-	}
-}
-
 void RampAgent::getAllAssignedStands()
 {
 	nlohmann::ordered_json response;
@@ -414,7 +277,7 @@ void RampAgent::getAllAssignedStands()
 	cli.set_write_timeout(1, 0);           // 1s
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 
-	auto res = cli.Get("/rampagent/api/occupancy/assigned", headers);
+	auto res = cli.Get("/rampagent/api/occupancy/", headers);
 
 	if (res && res->status >= 200 && res->status < 300) {
 		if (!printError) {
@@ -422,35 +285,7 @@ void RampAgent::getAllAssignedStands()
 			queueMessage("Successfully reconnected to Ramp Agent server.");
 		}
 		try {
-			if (!res->body.empty()) response["assignedStands"] = nlohmann::ordered_json::parse(res->body);
-			response["blockedStands"] = nlohmann::ordered_json::array();
-		}
-		catch (const std::exception& e) {
-			queueMessage("Failed to parse assigned stands data from Ramp Agent server: " + std::string(e.what()));
-			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-			assignedStands_ = nlohmann::ordered_json::object();
-			return;
-		}
-	}
-	else {
-		if (printError) {
-			printError = false; // avoid spamming logs
-			queueMessage("Failed to retrieve assigned stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
-		}
-		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-		assignedStands_ = nlohmann::ordered_json::object();
-		return;
-	}
-
-	res = cli.Get("/rampagent/api/occupancy/occupied", headers);
-
-	if (res && res->status >= 200 && res->status < 300) {
-		if (!printError) {
-			printError = true; // reset error printing flag on success
-			queueMessage("Successfully reconnected to Ramp Agent server.");
-		}
-		try {
-			if (!res->body.empty()) response["occupiedStands"] = nlohmann::ordered_json::parse(res->body);
+			if (!res->body.empty()) response = nlohmann::ordered_json::parse(res->body);
 			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
 			assignedStands_ = response;
 			return;
@@ -483,48 +318,6 @@ CFlightPlanControllerAssignedData rampAgent::RampAgent::getControllerAssignedDat
 		fp = FlightPlanSelectNext(fp);
 	}
 	return CFlightPlanControllerAssignedData();
-}
-
-bool RampAgent::printToFile(const std::vector<std::string>& lines, const std::string& fileName)
-{
-	char path[MAX_PATH + 1] = { 0 };
-	GetModuleFileNameA((HINSTANCE)&__ImageBase, path, MAX_PATH);
-	std::filesystem::path dllPath = std::filesystem::path(path).parent_path();
-
-
-	std::filesystem::path dir = dllPath / "logs" / "RampAgent";
-	std::error_code ec;
-	if (!std::filesystem::exists(dir))
-	{
-		if (!std::filesystem::create_directories(dir, ec))
-		{
-			DisplayMessage("Failed to create log directory: " + dir.string() + " ec=" + ec.message(), "");
-			return false;
-		}
-	}
-	std::filesystem::path filePath = dir / fileName;
-	std::ofstream outFile(filePath);
-	if (!outFile.is_open()) {
-		DisplayMessage("Could not open file to write: " + filePath.string());
-		return false;
-	}
-	for (const auto& line : lines) {
-		outFile << line << std::endl;
-	}
-	outFile.close();
-	return true;
-}
-
-bool rampAgent::RampAgent::dumpReportToLogFile()
-{
-	std::string fileName = "report_" + std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())) + ".txt";
-	std::vector<std::string> content;
-	content.push_back("--- Ramp Agent last Report Dump ---");
-	content.push_back("Is Connected: " + std::string(isConnected_ ? "Yes" : "No"));
-	content.push_back("Can send report: " + std::string(canSendReport_ ? "Yes" : "No"));
-	content.push_back("Report:");
-	content.push_back(lastReportJson_.dump(4).empty() ? "{}" : lastReportJson_.dump(4));
-	return printToFile(content, fileName);
 }
 
 bool rampAgent::RampAgent::isConnected()
