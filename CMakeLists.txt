@@ -49,15 +49,6 @@ configure_file(
     ${CMAKE_BINARY_DIR}/Version.h
 )
 
-if(NOT DEFINED AUTH_SECRET)
-    set(AUTH_SECRET "")
-endif()
-configure_file(
-    ${CMAKE_SOURCE_DIR}/src/Secret.h.in
-    ${CMAKE_BINARY_DIR}/Secret.h
-    @ONLY
-)
-
 # set DEBUG mode
 if (DEBUG)
     add_compile_definitions(DEBUG=1)
@@ -78,7 +69,7 @@ set(SOURCES
 )
 
 # Define the plugin library (create target before using target_*
-add_library(${PROJECT_NAME} SHARED ${SOURCES})
+add_library(${PROJECT_NAME} SHARED ${SOURCES} "src/Secret.h")
 
 # Find external dependencies
 FIND_PACKAGE(nlohmann_json CONFIG REQUIRED)
