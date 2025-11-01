@@ -12,7 +12,7 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 {
 	std::ignore = pt;
 
-	if (canSendReport_ == false || isConnected_ == false) return; // If OBS, can't assign stands
+	if (isController_ == false || isConnected_ == false) return; // If OBS, can't assign stands
 
 	auto fp = FlightPlanSelectASEL();
 	std::string callsign = toUpper(fp.GetCallsign());
@@ -34,10 +34,21 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 		for (const auto& button : menuButtons_) {
 			AddPopupListElement(button.c_str(), NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, false);
 		}
+		AddPopupListElement("Enter", NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, true);
 		break;
 	}
 	case TagActionID::AssignSTAND:
 	{
+		if (itemString == nullptr || strlen(itemString) == 0) {
+			DisplayMessage("No stand selected for assignment.", "");
+			return;
+		}
+
+		if (itemString == std::string("Enter")) {
+			OpenPopupEdit(area, static_cast<int>(TagActionID::AssignSTAND), "---");
+			return;
+		}
+
 		if (m_thread.joinable()) {
 			m_thread.join();
 		}
@@ -84,11 +95,13 @@ inline void rampAgent::RampAgent::updateStandMenuButtons(const std::string& icao
 		return;
 	}
 
-	if (standsJson.empty()) {
+	// minimal menu if no stands received
+	if (standsJson.empty() || assignedStands_.empty()) {
 		if (printError) {
 			printError = false; // avoid spamming logs
 			DisplayMessage("No stands data received from NeoRampAgent server for airport " + icao, "");
 		}
+		menuButtons_.clear();
 		return;
 	}
 
