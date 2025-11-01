@@ -47,12 +47,6 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		DisplayMessage(std::string("RampAgent version: ") + RAMPAGENT_VERSION, "");
 		return true;
 	}
-	if (sub == "dump")
-	{
-		const bool ok = dumpReportToLogFile();
-		DisplayMessage(ok ? "Report dump written to logs/NeoRampAgent" : "Failed to write report dump", "");
-		return true;
-	}
 	if (sub == "url")
 	{
 		std::string url;
@@ -69,19 +63,19 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 	if (sub == "connect")
 	{
 		isConnected_ = isConnected();
-		canSendReport_ = isController();
+		isController_ = isController();
 		// FIXME: DEBUG
 #ifdef DEV
-		canSendReport_ = true; // Force connected in dev mode
+		isController_ = true; // Force connected as controller in dev mode
 #endif // DEV
 		DisplayMessage(std::string("Connection status: ") + (isConnected_ ? "Connected" : "Not connected") +
-			", Role: " + (canSendReport_ ? "Controller" : "Observer") + ", Callsign: " + callsign_, "");
+			", Role: " + (isController_ ? "Controller" : "Observer") + ", Callsign: " + callsign_, "");
 		return true;
 	}
 	if (sub == "disconnect")
 	{
 		isConnected_ = false;
-		canSendReport_ = false;
+		isController_ = false;
 		callsign_.clear();
 		DisplayMessage("Disconnected.");
 		return true;
