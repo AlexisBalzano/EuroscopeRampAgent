@@ -63,7 +63,6 @@ void RampAgent::Initialize()
 	}
 	m_stop = false;
 	DisplayMessage("Ramp Agent initialized successfully", "Status");
-	DisplayMessage("Remember to use .rampAgent connect once connected to network.", "");
 }
 
 std::pair<bool, std::string> rampAgent::RampAgent::newVersionAvailable()
@@ -261,7 +260,9 @@ void rampAgent::RampAgent::OnControllerPositionUpdate(CController Controller)
 {
 	isConnected_ = isConnected();
 	isController_ = isController();
-	DisplayMessage("Controller position updated. Connected: " + std::string(isConnected_ ? "Yes" : "No") + ", Role: " + (isController_ ? "Controller" : "Observer"), "Status");
+#ifdef DEV
+	isController_ = true;
+#endif // DEV
 }
 
 std::string RampAgent::toUpper(std::string str)

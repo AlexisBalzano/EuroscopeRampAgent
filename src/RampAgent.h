@@ -66,7 +66,6 @@ namespace rampAgent {
 	public:
 		// Command IDs
 		std::string versionId_;
-		std::string menuId_;
 
 	private:
 		void runUpdate();

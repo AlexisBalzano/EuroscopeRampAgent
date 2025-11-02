@@ -60,18 +60,6 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		DisplayMessage("API URL set to " + url, "");
 		return true;
 	}
-	if (sub == "connect")
-	{
-		isConnected_ = isConnected();
-		isController_ = isController();
-		// FIXME: DEBUG
-#ifdef DEV
-		isController_ = true; // Force connected as controller in dev mode
-#endif // DEV
-		DisplayMessage(std::string("Connection status: ") + (isConnected_ ? "Connected" : "Not connected") +
-			", Role: " + (isController_ ? "Controller" : "Observer") + ", Callsign: " + callsign_, "");
-		return true;
-	}
 	if (sub == "disconnect")
 	{
 		isConnected_ = false;
@@ -80,7 +68,7 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		DisplayMessage("Disconnected.");
 		return true;
 	}
-	DisplayMessage("Commands: .rampAgent version / .rampAgent connect / .rampAgent disconnect / .rampAgent dump / .rampAgent url <url>", "");
+	DisplayMessage("Commands: .rampAgent version / .rampAgent disconnect / .rampAgent url <url>", "");
 	return true;
 }
 
