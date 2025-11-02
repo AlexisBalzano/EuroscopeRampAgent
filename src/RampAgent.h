@@ -14,7 +14,7 @@ namespace rampAgent {
 
 	extern RampAgent* myPluginInstance;
 
-	constexpr const char* RAMPAGENT_VERSION = "v1.0.1";
+	constexpr const char* RAMPAGENT_VERSION = "v1.0.2";
 	constexpr const char* RAMPAGENT_API = "pintade.vatsim.fr";
 
 	COLORREF WHITE = RGB(255, 255, 255);
@@ -52,6 +52,7 @@ namespace rampAgent {
 
 		// Scope events
 		void OnTimer(int Counter) override;
+		void OnControllerPositionUpdate(CController Controller) override;
 
 		std::string toUpper(std::string str);
 		std::pair<bool, CRadarTarget> aircraftExists(const std::string& callsign);
