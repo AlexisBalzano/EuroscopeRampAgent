@@ -184,33 +184,56 @@ void RampAgent::runUpdate() {
 		assignedStandsCopy["occupiedStands"].end()
 	); // display tag item on occupied stands as well
 
-	for (auto& stand : assigned) {
-		std::string callsign = stand["callsign"].get<std::string>();
-		if (aircraftExists(callsign).first == false) {
-			continue; // Aircraft not found, skip
-		}
+	try {
+		for (auto& stand : assigned) {
+			if (!stand.is_object()) continue;
 
-		std::string standName = stand["name"].get<std::string>();
-		
-		{
-			std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
-			if (manualAssignedCallsigns_.find(callsign) != manualAssignedCallsigns_.end()) {
-				standName = manualAssignedCallsigns_[callsign];
+			// callsign
+			const auto csIt = stand.find("callsign");
+			if (csIt == stand.end() || !csIt->is_string()) continue;
+			const std::string callsign = csIt->get<std::string>();
+
+			if (aircraftExists(callsign).first == false) {
+				continue; // Aircraft not found, skip
+			}
+
+			// stand name
+			const auto nameIt = stand.find("name");
+			if (nameIt == stand.end() || !nameIt->is_string()) continue;
+			std::string standName = nameIt->get<std::string>();
+			standTagMap[callsign] = standName;
+
+			{
+				std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+				if (manualAssignedCallsigns_.find(callsign) != manualAssignedCallsigns_.end()) {
+					standName = manualAssignedCallsigns_[callsign];
+				}
+			}
+
+			standTagMap[callsign] = standName;
+
+			// remark: accept string only; treat null/other as empty
+			std::string remark;
+			if (auto rIt = stand.find("remark"); rIt != stand.end() && rIt->is_string()) {
+				remark = rIt->get<std::string>();
+			}
+			else {
+				remark.clear();
+			}
+
+			// Update only if changed or new
+			if (auto it = lastStandTagMap_.find(callsign);
+				it != lastStandTagMap_.end() && it->second == standName) {
+				UpdateTagItems(callsign, WHITE, standName, remark);
+			}
+			else {
+				UpdateTagItems(callsign, YELLOW, standName, remark);
 			}
 		}
-
-		standTagMap[callsign] = standName;
-
-		std::string remark = stand.value("remark", "");
-
-		// Update only if changed or new
-		if (lastStandTagMapCopy.find(callsign) != lastStandTagMapCopy.end() && lastStandTagMapCopy[callsign] == standName) {
-			UpdateTagItems(callsign, WHITE, standName, remark);
-			continue;
-		}
-		else {
-			UpdateTagItems(callsign, YELLOW, standName, remark);
-		}
+	}
+	catch (const std::exception& e) {
+		DisplayMessage("runScopeUpdate: failed to process assigned stands: " + std::string(e.what()), "Error");
+		return;
 	}
 
 	// Clear tags for aircraft that are no longer assigned
@@ -223,7 +246,7 @@ void RampAgent::runUpdate() {
 	{
 		std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
 		manualAssignedCallsigns_.clear();
-		
+
 	}
 
 	std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);
@@ -232,6 +255,13 @@ void RampAgent::runUpdate() {
 
 void RampAgent::OnTimer(int Counter) {
 	if (Counter % 10 == 0) this->runUpdate();
+}
+
+void rampAgent::RampAgent::OnControllerPositionUpdate(CController Controller)
+{
+	isConnected_ = isConnected();
+	isController_ = isController();
+	DisplayMessage("Controller position updated. Connected: " + std::string(isConnected_ ? "Yes" : "No") + ", Role: " + (isController_ ? "Controller" : "Observer"), "Status");
 }
 
 std::string RampAgent::toUpper(std::string str)
