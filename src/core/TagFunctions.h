@@ -44,7 +44,7 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 			return;
 		}
 
-		if (itemString == std::string("Enter")) {
+		if (itemString == std::string("[---]")) {
 			OpenPopupEdit(area, static_cast<int>(TagActionID::AssignSTAND), "---");
 			return;
 		}
