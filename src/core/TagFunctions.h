@@ -30,10 +30,10 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 
 		updateStandMenuButtons(icao);
 
-		AddPopupListElement("None", NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, true);
 		for (const auto& button : menuButtons_) {
 			AddPopupListElement(button.c_str(), NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, false);
 		}
+		AddPopupListElement("None", NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, true);
 		AddPopupListElement("[---]", NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, true);
 		break;
 	}
