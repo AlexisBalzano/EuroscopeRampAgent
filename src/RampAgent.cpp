@@ -253,7 +253,7 @@ void RampAgent::runUpdate() {
 }
 
 void RampAgent::OnTimer(int Counter) {
-	if (Counter % 10 == 0) this->runUpdate();
+	if (Counter % 15 == 0) this->runUpdate();
 }
 
 void rampAgent::RampAgent::OnControllerPositionUpdate(CController Controller)
