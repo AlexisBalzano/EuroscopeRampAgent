@@ -27,6 +27,8 @@ inline void RampAgent::UpdateTagItems(std::string callsign, COLORREF color, std:
 
 	CFlightPlanControllerAssignedData assignedData = getControllerAssignedData(callsign);
 	assignedData.SetFlightStripAnnotation(3, standName.c_str());
+	assignedData.SetFlightStripAnnotation(4, remark.c_str());
+
 }
 
 inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget, int ItemCode, int TagData, char sItemString[16], int* pColorCode, COLORREF* pRGB, double* pFontSize)
