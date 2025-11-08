@@ -8,7 +8,7 @@ void RampAgent::RegisterTagItems() {
 	RegisterTagItemType("REMARK", static_cast<int>(TagItemID::REMARK));
 }
 
-inline void RampAgent::UpdateTagItems(std::string Callsign, COLORREF color, std::string standName, std::string remark)
+inline void RampAgent::UpdateTagItems(std::string callsign, COLORREF color, std::string standName, std::string remark)
 {
 	std::lock_guard<std::mutex> lock(tagItemValueMapMutex_);
 	TagItemInfo tagInfo;
@@ -16,7 +16,17 @@ inline void RampAgent::UpdateTagItems(std::string Callsign, COLORREF color, std:
 	tagInfo.remark = remark;
 	tagInfo.color = color;
 
-	tagItemValueMap_[Callsign] = tagInfo;
+	tagItemValueMap_[callsign] = tagInfo;
+
+	// Set sratchpad value for the stand to appear inside vSMR when aircraft is on ground (ie speed < 60kt)
+	std::pair<bool, CRadarTarget> aircraft = aircraftExists(callsign);
+
+	if (aircraft.first == false) return; // Aircraft not found, skip
+
+	if (aircraft.second.GetGS() > 60) return; // Aircraft is not on ground, skip
+
+	CFlightPlanControllerAssignedData assignedData = getControllerAssignedData(callsign);
+	assignedData.SetFlightStripAnnotation(3, standName.c_str());
 }
 
 inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget, int ItemCode, int TagData, char sItemString[16], int* pColorCode, COLORREF* pRGB, double* pFontSize)
@@ -44,16 +54,7 @@ inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, Eur
 			std::snprintf(sItemString, 16, "%s", standName.c_str());
 			*pRGB = tagItemValueMap_[callsign].color;
 
-			// Set sratchpad value for the stand to appear inside vSMR when aircraft is on ground (ie speed < 60kt)
-			std::pair<bool, CRadarTarget> aircraft = aircraftExists(callsign);
 
-			if (aircraft.first == false) break; // Aircraft not found, skip
-
-			if (aircraft.second.GetGS() > 60) break; // Aircraft is not on ground, skip
-
-			CFlightPlanControllerAssignedData assignedData = getControllerAssignedData(callsign);
-			assignedData.SetFlightStripAnnotation(3, standName.c_str());
-			break;
 		}
 		case TagItemID::REMARK:
 		{
