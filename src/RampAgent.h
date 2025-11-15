@@ -14,7 +14,7 @@ namespace rampAgent {
 
 	extern RampAgent* myPluginInstance;
 
-	constexpr const char* RAMPAGENT_VERSION = "v1.0.4";
+	constexpr const char* RAMPAGENT_VERSION = "v1.0.5";
 	constexpr const char* RAMPAGENT_API = "pintade.vatsim.fr";
 
 	COLORREF WHITE = RGB(255, 255, 255);

@@ -55,8 +55,7 @@ inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, Eur
 			std::string standName = tagItemValueMap_[callsign].standName;
 			std::snprintf(sItemString, 16, "%s", standName.c_str());
 			*pRGB = tagItemValueMap_[callsign].color;
-
-
+			break;
 		}
 		case TagItemID::REMARK:
 		{
