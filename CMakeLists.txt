@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake)
 SET(VCPKG_TARGET_TRIPLET "x86-windows-static" CACHE STRING "")
-project(RampAgent VERSION "1.0.5")
+project(RampAgent VERSION "1.0.6")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

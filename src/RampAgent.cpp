@@ -312,7 +312,7 @@ void RampAgent::getAllAssignedStands()
 	cli.set_write_timeout(1, 0);           // 1s
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 
-	auto res = cli.Get("/rampagent/api/occupancy/?callsign=" + callsign_ , headers);
+	auto res = cli.Get("/api/occupancy/?callsign=" + callsign_ , headers);
 
 	if (res && res->status >= 200 && res->status < 300) {
 		if (!printError) {
