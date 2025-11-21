@@ -62,7 +62,6 @@ void RampAgent::Initialize()
 		DisplayMessage("Failed to initialize Ramp Agent: " + std::string(e.what()), "Error");
 	}
 	m_stop = false;
-	DisplayMessage("Ramp Agent initialized successfully", "Status");
 }
 
 std::pair<bool, std::string> rampAgent::RampAgent::newVersionAvailable()
@@ -163,7 +162,12 @@ void RampAgent::runUpdate() {
 	if (assignedStandsCopy.empty()) {
 		if (printError) {
 			printError = false; // avoid spamming logs
-			DisplayMessage("No occupied stands data received to update tags.", "");
+			if (firstTime) {
+				firstTime = false;
+			}
+			else {
+				DisplayMessage("No assigned stands data received to update tags.", "");
+			}
 		}
 		// Clear All Tag Items
 		for (const auto& [callsign, standName] : lastStandTagMapCopy) {
@@ -331,7 +335,12 @@ void RampAgent::getAllAssignedStands()
 	else {
 		if (printError) {
 			printError = false; // avoid spamming logs
-			queueMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
+			if (firstTime == false) {
+				queueMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
+			}
+			else {
+				firstTime = false;
+			}
 		}
 	}
 

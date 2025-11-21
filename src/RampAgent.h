@@ -14,7 +14,7 @@ namespace rampAgent {
 
 	extern RampAgent* myPluginInstance;
 
-	constexpr const char* RAMPAGENT_VERSION = "v1.0.5";
+	constexpr const char* RAMPAGENT_VERSION = "v1.0.6";
 	constexpr const char* RAMPAGENT_API = "pintade.vatsim.fr";
 
 	COLORREF WHITE = RGB(255, 255, 255);
@@ -81,6 +81,7 @@ namespace rampAgent {
 		bool isController_ = false;
 		bool isConnected_ = false;
 		bool printError = true;
+		bool firstTime = true;
 		std::unordered_map<std::string, std::string> lastStandTagMap_; // used to determine if new value
 		std::mutex lastStandTagMapMutex_;
 		std::unordered_map<std::string, TagItemInfo> tagItemValueMap_; // maps callsign to stand tag ID
