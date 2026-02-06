@@ -96,7 +96,7 @@ namespace rampAgent {
 	private:
 		// Plugin state
 		bool initialized_ = false;
-		bool m_stop;
+		std::atomic<bool> m_stop{false};
 		std::thread m_thread;
 		std::condition_variable m_cv;
 		std::mutex m_cvMutex;
@@ -105,6 +105,10 @@ namespace rampAgent {
 		bool isConnected_ = false;
 		std::atomic<bool> printError{true};
 		std::atomic<bool> firstTime{true};
+		
+		// Constants
+		static constexpr size_t MAX_API_QUEUE_SIZE = 100;
+		
 		std::unordered_map<std::string, std::string> lastStandTagMap_; // used to determine if new value
 		std::mutex lastStandTagMapMutex_;
 		std::unordered_map<std::string, TagItemInfo> tagItemValueMap_; // maps callsign to stand tag ID

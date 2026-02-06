@@ -22,8 +22,9 @@ using namespace EuroScopePlugIn;
 
 rampAgent::RampAgent* rampAgent::myPluginInstance = nullptr;
 
-RampAgent::RampAgent() : CPlugIn(EuroScopePlugIn::COMPATIBILITY_CODE, "RampAgent", PLUGIN_VERSION, "French vACC", "Open Source"), m_stop(false)
+RampAgent::RampAgent() : CPlugIn(EuroScopePlugIn::COMPATIBILITY_CODE, "RampAgent", PLUGIN_VERSION, "French vACC", "Open Source")
 {
+	m_stop.store(false, std::memory_order_relaxed);
 	Initialize();
 };
 RampAgent::~RampAgent()
@@ -52,7 +53,7 @@ void RampAgent::Initialize()
 		RegisterTagActions();
 		
 		// Start the persistent worker thread
-		m_stop = false;
+		m_stop.store(false, std::memory_order_release);
 		m_thread = std::thread(&RampAgent::workerThread, this);
 	}
 	catch (const std::exception& e)
@@ -67,11 +68,14 @@ void RampAgent::Shutdown()
 	{
 		initialized_ = false;
 	}
-	m_stop = true;
+	
+	// Signal worker thread to stop with proper memory ordering
+	m_stop.store(true, std::memory_order_release);
 	
 	// Wake up the worker thread so it can exit
 	m_cv.notify_one();
 	
+	// Wait for worker thread to finish
 	if (m_thread.joinable())
 		m_thread.join();
 
@@ -98,7 +102,7 @@ void RampAgent::runUpdate() {
 	}
 
 	// Signal the worker thread to fetch data
-	m_fetchRequested.store(true);
+	m_fetchRequested.store(true, std::memory_order_release);
 	m_cv.notify_one();
 
 	// Now use the existing assignedStands_ data (may be from previous fetch)
@@ -115,8 +119,8 @@ void RampAgent::runUpdate() {
 	}
 
 	if (assignedStandsCopy.empty()) {
-		if (printError.exchange(false)) { // avoid spamming logs
-			if (!firstTime.exchange(false)) {
+		if (printError.exchange(false, std::memory_order_acq_rel)) { // avoid spamming logs
+			if (!firstTime.exchange(false, std::memory_order_acq_rel)) {
 				DisplayMessage("No assigned stands data received to update tags.", "");
 			}
 		}
@@ -196,6 +200,10 @@ void RampAgent::runUpdate() {
 			}
 		}
 	}
+	catch (const nlohmann::json::exception& e) {
+		DisplayMessage("runScopeUpdate: failed to process assigned stands: " + std::string(e.what()), "Error");
+		return;
+	}
 	catch (const std::exception& e) {
 		DisplayMessage("runScopeUpdate: failed to process assigned stands: " + std::string(e.what()), "Error");
 		return;
@@ -232,21 +240,28 @@ void RampAgent::workerThread() {
 	cli->set_read_timeout(1, 0);            // 1s
 	cli->set_write_timeout(1, 0);           // 1s
 	
-	while (!m_stop) {
+	while (!m_stop.load(std::memory_order_acquire)) {
 		// Wait for a fetch request or shutdown signal
 		{
 			std::unique_lock<std::mutex> lock(m_cvMutex);
 			m_cv.wait(lock, [this] { 
-				return m_fetchRequested.load() || !apiRequestQueue_.empty() || m_stop; 
+				return m_fetchRequested.load(std::memory_order_relaxed) || 
+				       !apiRequestQueue_.empty() || 
+				       m_stop.load(std::memory_order_acquire); 
 			});
 			
-			if (m_stop) {
+			if (m_stop.load(std::memory_order_acquire)) {
 				break;
 			}
 			
 			// Process periodic fetch if requested
-			if (m_fetchRequested.exchange(false)) {
-				getAllAssignedStands();
+			if (m_fetchRequested.exchange(false, std::memory_order_acq_rel)) {
+				try {
+					getAllAssignedStands();
+				}
+				catch (const std::exception& e) {
+					queueMessage("Worker thread error during fetch: " + std::string(e.what()));
+				}
 			}
 		}
 		
@@ -267,15 +282,26 @@ void RampAgent::workerThread() {
 				std::lock_guard<std::mutex> lock(apiUrlMutex_);
 				if (localApiUrl != apiUrl_) {
 					localApiUrl = apiUrl_;
-					cli = std::make_unique<httplib::SSLClient>(localApiUrl, 443);
-					cli->set_connection_timeout(0, 700000);
-					cli->set_read_timeout(1, 0);
-					cli->set_write_timeout(1, 0);
+					try {
+						cli = std::make_unique<httplib::SSLClient>(localApiUrl, 443);
+						cli->set_connection_timeout(0, 700000);
+						cli->set_read_timeout(1, 0);
+						cli->set_write_timeout(1, 0);
+					}
+					catch (const std::exception& e) {
+						queueMessage("Failed to recreate SSL client: " + std::string(e.what()));
+						continue;
+					}
 				}
 			}
 			
-			// Process the request
-			processApiRequest(*cli, request);
+			// Process the request with exception handling
+			try {
+				processApiRequest(*cli, request);
+			}
+			catch (const std::exception& e) {
+				queueMessage("Worker thread error processing request: " + std::string(e.what()));
+			}
 		}
 	}
 }
@@ -289,6 +315,14 @@ void RampAgent::queueApiRequest(ApiRequestType type, const std::string& icao, co
 	
 	{
 		std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
+		
+		// Check queue size limit to prevent unbounded growth
+		if (apiRequestQueue_.size() >= MAX_API_QUEUE_SIZE) {
+			// Drop oldest request
+			apiRequestQueue_.pop();
+			queueMessage("API request queue full, dropped oldest request");
+		}
+		
 		apiRequestQueue_.push(request);
 	}
 	
@@ -299,126 +333,137 @@ void RampAgent::queueApiRequest(ApiRequestType type, const std::string& icao, co
 void RampAgent::processApiRequest(httplib::SSLClient& cli, const ApiRequest& request) {
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 	
-	switch (request.type) {
-		case ApiRequestType::FETCH_OCCUPANCY:
-		{
-			// This is handled by getAllAssignedStands() which is already implemented
-			break;
-		}
-		
-		case ApiRequestType::FETCH_STANDS:
-		{
-			std::string apiEndpoint = "/api/airports/" + request.icao + "/stands";
-			auto res = cli.Get(apiEndpoint.c_str(), headers);
-			
-			if (res && res->status >= 200 && res->status < 300) {
-				try {
-					if (!res->body.empty()) {
-						nlohmann::ordered_json standsJson = nlohmann::ordered_json::parse(res->body);
-						
-						// Cache the stands data
-						{
-							std::lock_guard<std::mutex> lock(standsDataCacheMutex_);
-							standsDataCache_ = standsJson;
-						}
-						
-						if (!printError.load()) {
-							printError.store(true);
-							queueMessage("Successfully retrieved stands information for " + request.icao);
-						}
-					}
-				}
-				catch (const std::exception& e) {
-					queueMessage("Failed to parse stands data: " + std::string(e.what()));
-				}
-			}
-			else {
-				if (printError.load()) {
-					printError.store(false);
-					queueMessage("Failed to get stands information. HTTP status: " + std::to_string(res ? res->status : 0));
-				}
-			}
-			break;
-		}
-		
-		case ApiRequestType::ASSIGN_STAND:
-		{
-			std::string localCallsign;
+	try {
+		switch (request.type) {
+			case ApiRequestType::FETCH_OCCUPANCY:
 			{
-				std::lock_guard<std::mutex> lock(callsignMutex_);
-				localCallsign = callsign_;
+				// This is handled by getAllAssignedStands() which is already implemented
+				break;
 			}
 			
-			std::string token = generateToken(localCallsign);
-			std::string apiEndpoint = "/api/assign?stand=" + request.standName + 
-			                          "&icao=" + request.icao + 
-			                          "&callsign=" + request.callsign + 
-			                          "&token=" + token + 
-			                          "&client=" + localCallsign;
-			
-			auto res = cli.Get(apiEndpoint.c_str(), headers);
-			
-			if (!res || !(res->status >= 200 && res->status < 300)) {
-				queueMessage("Failed to send manual assign. HTTP status: " + std::to_string(res ? res->status : 0));
-				return;
-			}
-			
-			if (!res->body.empty()) {
-				try {
-					nlohmann::ordered_json dataJson = nlohmann::ordered_json::parse(res->body);
-					
-					if (!dataJson.contains("message")) {
-						queueMessage("Malformed response from server");
-						return;
+			case ApiRequestType::FETCH_STANDS:
+			{
+				std::string apiEndpoint = "/api/airports/" + request.icao + "/stands";
+				auto res = cli.Get(apiEndpoint.c_str(), headers);
+				
+				if (res && res->status >= 200 && res->status < 300) {
+					try {
+						if (!res->body.empty()) {
+							nlohmann::ordered_json standsJson = nlohmann::ordered_json::parse(res->body);
+							
+							// Cache the stands data
+							{
+								std::lock_guard<std::mutex> lock(standsDataCacheMutex_);
+								standsDataCache_ = standsJson;
+							}
+							
+							if (!printError.load(std::memory_order_relaxed)) {
+								printError.store(true, std::memory_order_relaxed);
+								queueMessage("Successfully retrieved stands information for " + request.icao);
+							}
+						}
 					}
-					
-					auto& message = dataJson["message"];
-					if (!message.contains("action") || !message["action"].is_string()) {
-						queueMessage("Malformed response from server");
-						return;
+					catch (const nlohmann::json::exception& e) {
+						queueMessage("Failed to parse stands data: " + std::string(e.what()));
 					}
-					
-					std::string action = message["action"].get<std::string>();
-					
-					if (action == "assign") {
-						{
-							std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
-							lastStandTagMap_[request.callsign] = request.standName;
-						}
-						{
-							std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
-							manualAssignedCallsigns_[request.callsign] = request.standName;
-						}
-						UpdateTagItems(request.callsign, WHITE, request.standName);
-						queueMessage("Stand " + request.standName + " assigned to " + request.callsign);
-					}
-					else if (action == "free") {
-						{
-							std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
-							lastStandTagMap_.erase(request.callsign);
-						}
-						{
-							std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
-							manualAssignedCallsigns_[request.callsign] = "";
-						}
-						UpdateTagItems(request.callsign, WHITE, "");
-						queueMessage("Stand freed for " + request.callsign);
-					}
-					else {
-						if (message.contains("message") && message["message"].is_string()) {
-							std::string msg = message["message"].get<std::string>();
-							queueMessage("Manual stand rejected: " + msg);
-						} else {
-							queueMessage("Manual stand assignment failed with unknown action: " + action);
-						}
+					catch (const std::exception& e) {
+						queueMessage("Failed to parse stands data: " + std::string(e.what()));
 					}
 				}
-				catch (const std::exception& e) {
-					queueMessage("Failed to parse stand assignment response: " + std::string(e.what()));
+				else {
+					if (printError.load(std::memory_order_relaxed)) {
+						printError.store(false, std::memory_order_relaxed);
+						queueMessage("Failed to get stands information. HTTP status: " + std::to_string(res ? res->status : 0));
+					}
 				}
+				break;
 			}
-			break;
+			
+			case ApiRequestType::ASSIGN_STAND:
+			{
+				std::string localCallsign;
+				{
+					std::lock_guard<std::mutex> lock(callsignMutex_);
+					localCallsign = callsign_;
+				}
+				
+				std::string token = generateToken(localCallsign);
+				std::string apiEndpoint = "/api/assign?stand=" + request.standName + 
+				                          "&icao=" + request.icao + 
+				                          "&callsign=" + request.callsign + 
+				                          "&token=" + token + 
+				                          "&client=" + localCallsign;
+				
+				auto res = cli.Get(apiEndpoint.c_str(), headers);
+				
+				if (!res || !(res->status >= 200 && res->status < 300)) {
+					queueMessage("Failed to send manual assign. HTTP status: " + std::to_string(res ? res->status : 0));
+					return;
+				}
+				
+				if (!res->body.empty()) {
+					try {
+						nlohmann::ordered_json dataJson = nlohmann::ordered_json::parse(res->body);
+						
+						if (!dataJson.contains("message")) {
+							queueMessage("Malformed response from server");
+							return;
+						}
+						
+						auto& message = dataJson["message"];
+						if (!message.contains("action") || !message["action"].is_string()) {
+							queueMessage("Malformed response from server");
+							return;
+						}
+						
+						std::string action = message["action"].get<std::string>();
+						
+						if (action == "assign") {
+							{
+								std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
+								lastStandTagMap_[request.callsign] = request.standName;
+							}
+							{
+								std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+								manualAssignedCallsigns_[request.callsign] = request.standName;
+							}
+							UpdateTagItems(request.callsign, WHITE, request.standName);
+							queueMessage("Stand " + request.standName + " assigned to " + request.callsign);
+						}
+						else if (action == "free") {
+							{
+								std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
+								lastStandTagMap_.erase(request.callsign);
+							}
+							{
+								std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+								manualAssignedCallsigns_[request.callsign] = "";
+							}
+							UpdateTagItems(request.callsign, WHITE, "");
+							queueMessage("Stand freed for " + request.callsign);
+						}
+						else {
+							if (message.contains("message") && message["message"].is_string()) {
+								std::string msg = message["message"].get<std::string>();
+								queueMessage("Manual stand rejected: " + msg);
+							} else {
+								queueMessage("Manual stand assignment failed with unknown action: " + action);
+							}
+						}
+					}
+					catch (const nlohmann::json::exception& e) {
+						queueMessage("Failed to parse stand assignment response: " + std::string(e.what()));
+					}
+					catch (const std::exception& e) {
+						queueMessage("Failed to parse stand assignment response: " + std::string(e.what()));
+					}
+				}
+				break;
+			}
 		}
+	}
+	catch (const std::exception& e) {
+		queueMessage("Exception in processApiRequest: " + std::string(e.what()));
 	}
 }
 
@@ -486,40 +531,51 @@ void RampAgent::getAllAssignedStands()
 		localApiUrl = apiUrl_;
 	}
 
-	httplib::SSLClient cli(localApiUrl, 443);
-	cli.set_connection_timeout(0, 700000); // 700ms
-	cli.set_read_timeout(1, 0);            // 1s
-	cli.set_write_timeout(1, 0);           // 1s
-	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
+	try {
+		httplib::SSLClient cli(localApiUrl, 443);
+		cli.set_connection_timeout(0, 700000); // 700ms
+		cli.set_read_timeout(1, 0);            // 1s
+		cli.set_write_timeout(1, 0);           // 1s
+		httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 
-	auto res = cli.Get("/api/occupancy/?callsign=" + localCallsign, headers);
+		auto res = cli.Get("/api/occupancy/?callsign=" + localCallsign, headers);
 
-	if (res && res->status >= 200 && res->status < 300) {
-		if (!printError.exchange(true)) { // reset error printing flag on success 
-			queueMessage("Successfully reconnected to Ramp Agent server.");
+		if (res && res->status >= 200 && res->status < 300) {
+			if (!printError.exchange(true, std::memory_order_acq_rel)) { // reset error printing flag on success 
+				queueMessage("Successfully reconnected to Ramp Agent server.");
+			}
+			try {
+				if (!res->body.empty()) response = nlohmann::ordered_json::parse(res->body);
+				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+				assignedStands_ = response;
+				return;
+			}
+			catch (const nlohmann::json::exception& e) {
+				queueMessage("Failed to parse occupied stands data from Ramp Agent server: " + std::string(e.what()));
+				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+				assignedStands_ = nlohmann::ordered_json::object();
+				return;
+			}
+			catch (const std::exception& e) {
+				queueMessage("Failed to parse occupied stands data from Ramp Agent server: " + std::string(e.what()));
+				std::lock_guard<std::mutex> lock(assignedStandsMutex_);
+				assignedStands_ = nlohmann::ordered_json::object();
+				return;
+			}
 		}
-		try {
-			if (!res->body.empty()) response = nlohmann::ordered_json::parse(res->body);
-			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-			assignedStands_ = response;
-			return;
-		}
-		catch (const std::exception& e) {
-			queueMessage("Failed to parse occupied stands data from Ramp Agent server: " + std::string(e.what()));
-			std::lock_guard<std::mutex> lock(assignedStandsMutex_);
-			assignedStands_ = nlohmann::ordered_json::object();
-			return;
+		else {
+			if (printError.exchange(false, std::memory_order_acq_rel)) {
+				if (firstTime.load(std::memory_order_relaxed) == false) {
+					queueMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
+				}
+				else {
+					firstTime.store(false, std::memory_order_relaxed);
+				}
+			}
 		}
 	}
-	else {
-		if (printError.exchange(false)) {
-			if (firstTime.load() == false) {
-				queueMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
-			}
-			else {
-				firstTime.store(false);
-			}
-		}
+	catch (const std::exception& e) {
+		queueMessage("Exception in getAllAssignedStands: " + std::string(e.what()));
 	}
 
 	std::lock_guard<std::mutex> lock(assignedStandsMutex_);
@@ -540,7 +596,7 @@ CFlightPlanControllerAssignedData rampAgent::RampAgent::getControllerAssignedDat
 
 bool rampAgent::RampAgent::isConnected()
 {
-	bool userIsConnected = this->GetConnectionType() != EuroScopePlugIn::CONNECTION_TYPE_NO;
+	bool userIsConnected = this->GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_DIRECT;
 	return userIsConnected;
 }
 
