@@ -2,6 +2,8 @@
 #include <Windows.h>
 #include <EuroScopePlugIn.h>
 #include <thread>
+#include <condition_variable>
+#include <queue>
 #include <string>
 #include <nlohmann/json.hpp>
 #include <mutex>
@@ -14,7 +16,7 @@ namespace rampAgent {
 
 	extern RampAgent* myPluginInstance;
 
-	constexpr const char* RAMPAGENT_VERSION = "v1.0.6";
+	constexpr const char* RAMPAGENT_VERSION = "v1.0.7";
 	constexpr const char* RAMPAGENT_API = "rampagent.vatsim.fr";
 
 	COLORREF WHITE = RGB(255, 255, 255);
@@ -42,7 +44,6 @@ namespace rampAgent {
 	public:
 		// Plugin lifecycle methods
 		void Initialize();
-		std::pair<bool, std::string> newVersionAvailable();
 		void Shutdown();
 		void Reset();
 
@@ -52,14 +53,16 @@ namespace rampAgent {
 
 		// Scope events
 		void OnTimer(int Counter) override;
-		void OnControllerPositionUpdate(CController Controller) override;
 
 		std::string toUpper(std::string str);
 		std::pair<bool, CRadarTarget> aircraftExists(const std::string& callsign);
 		std::vector<std::pair<CRadarTarget,CFlightPlan>> getAllAircraftsAndFP();
 		void getAllAssignedStands();
 		CFlightPlanControllerAssignedData getControllerAssignedData(const std::string callsign);
-		void changeApiUrl(const std::string& newUrl) { apiUrl_ = newUrl; }
+		void changeApiUrl(const std::string& newUrl) { 
+			std::lock_guard<std::mutex> lock(apiUrlMutex_);
+			apiUrl_ = newUrl; 
+		}
 		std::string generateToken(const std::string& callsign);
 		void assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao);
 
@@ -68,26 +71,48 @@ namespace rampAgent {
 		std::string versionId_;
 
 	private:
+		// API request queue types (declared before methods that use them)
+		enum class ApiRequestType {
+			FETCH_OCCUPANCY,
+			FETCH_STANDS,
+			ASSIGN_STAND
+		};
+		
+		struct ApiRequest {
+			ApiRequestType type;
+			std::string icao;
+			std::string callsign;
+			std::string standName;
+		};
+
 		void runUpdate();
 		bool isConnected();
 		bool isController();
 		void sortStandList(std::vector<std::string>& standList);
+		void workerThread(); // Background thread worker
+		void processApiRequest(httplib::SSLClient& cli, const ApiRequest& request);
+		void queueApiRequest(ApiRequestType type, const std::string& icao = "", const std::string& callsign = "", const std::string& standName = "");
 
 	private:
 		// Plugin state
 		bool initialized_ = false;
 		bool m_stop;
 		std::thread m_thread;
+		std::condition_variable m_cv;
+		std::mutex m_cvMutex;
+		std::atomic<bool> m_fetchRequested{false};
 		bool isController_ = false;
 		bool isConnected_ = false;
-		bool printError = true;
-		bool firstTime = true;
+		std::atomic<bool> printError{true};
+		std::atomic<bool> firstTime{true};
 		std::unordered_map<std::string, std::string> lastStandTagMap_; // used to determine if new value
 		std::mutex lastStandTagMapMutex_;
 		std::unordered_map<std::string, TagItemInfo> tagItemValueMap_; // maps callsign to stand tag ID
 		std::mutex tagItemValueMapMutex_;
 		std::string apiUrl_ = RAMPAGENT_API;
+		std::mutex apiUrlMutex_;  // Protect apiUrl_
 		std::string callsign_;
+		std::mutex callsignMutex_;  // Protect callsign_
 		std::vector<std::string> messageQueue_;
 		std::mutex messageQueueMutex_;
 		nlohmann::ordered_json assignedStands_;
@@ -96,7 +121,13 @@ namespace rampAgent {
 		std::unordered_map<std::string, std::string> manualAssignedCallsigns_;
 		std::mutex manualAssignedCallsignsMutex_;
 
-
+		// API request queue
+		std::queue<ApiRequest> apiRequestQueue_;
+		std::mutex apiRequestQueueMutex_;
+		
+		// API response data
+		nlohmann::ordered_json standsDataCache_; // Cache for stands data per ICAO
+		std::mutex standsDataCacheMutex_;
 		// Tag Items
 		void RegisterTagItems();
 		void RegisterTagActions();

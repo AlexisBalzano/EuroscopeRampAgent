@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <limits>
 #include <cctype>
+#include <memory>
 #include <httplib.h>
 #include <fstream>
 #include <filesystem>
@@ -44,59 +45,19 @@ void __declspec (dllexport) EuroScopePlugInExit()
 
 void RampAgent::Initialize()
 {
-#ifndef DEV
-	std::pair<bool, std::string> updateAvailable = newVersionAvailable();
-	if (updateAvailable.first) {
-		DisplayMessage("A new version of Ramp Agent is available: " + updateAvailable.second + " (current version: " + RAMPAGENT_VERSION + ")", "");
-	}
-#endif // !DEV
-
 	try
 	{
 		initialized_ = true;
 		RegisterTagItems();
 		RegisterTagActions();
+		
+		// Start the persistent worker thread
+		m_stop = false;
+		m_thread = std::thread(&RampAgent::workerThread, this);
 	}
 	catch (const std::exception& e)
 	{
 		DisplayMessage("Failed to initialize Ramp Agent: " + std::string(e.what()), "Error");
-	}
-	m_stop = false;
-}
-
-std::pair<bool, std::string> rampAgent::RampAgent::newVersionAvailable()
-{
-	httplib::SSLClient cli("api.github.com");
-	cli.set_connection_timeout(0, 700000); // 700ms
-	cli.set_read_timeout(1, 0);            // 1s
-	cli.set_write_timeout(1, 0);           // 1s
-	cli.set_keep_alive(false);             // don't hold sockets open
-	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgentVersionChecker"} };
-	std::string apiEndpoint = "/repos/AlexisBalzano/EuroscopeRampAgent/releases/latest";
-
-	auto res = cli.Get(apiEndpoint.c_str(), headers);
-	if (res && res->status == 200) {
-		try
-		{
-			auto json = nlohmann::json::parse(res->body);
-			std::string latestVersion = json["tag_name"];
-			if (latestVersion != RAMPAGENT_VERSION) {
-				DisplayMessage("A new version of Ramp Agent is available: " + latestVersion + " (current version: " + RAMPAGENT_VERSION + ")");
-				return { true, latestVersion };
-			}
-			else {
-				return { false, "" };
-			}
-		}
-		catch (const std::exception& e)
-		{
-			DisplayMessage("Failed to parse version information from GitHub: " + std::string(e.what()));
-			return { false, "" };
-		}
-	}
-	else {
-		DisplayMessage("Failed to check for Ramp Agent updates. HTTP status: " + std::to_string(res ? res->status : 0));
-		return { false, "" };
 	}
 }
 
@@ -107,6 +68,10 @@ void RampAgent::Shutdown()
 		initialized_ = false;
 	}
 	m_stop = true;
+	
+	// Wake up the worker thread so it can exit
+	m_cv.notify_one();
+	
 	if (m_thread.joinable())
 		m_thread.join();
 
@@ -132,21 +97,11 @@ void RampAgent::runUpdate() {
 		return;
 	}
 
+	// Signal the worker thread to fetch data
+	m_fetchRequested.store(true);
+	m_cv.notify_one();
 
-	if (m_thread.joinable()) {
-		m_thread.join();
-	}
-	m_thread = std::thread(&RampAgent::getAllAssignedStands, this);
-
-	{
-		std::lock_guard<std::mutex> lock(messageQueueMutex_);
-		for (const auto& msg : messageQueue_) {
-			DisplayMessage(msg, "");
-		}
-		messageQueue_.clear();
-	}
-
-	// AssignedStands_ is updated we can use it
+	// Now use the existing assignedStands_ data (may be from previous fetch)
 	nlohmann::ordered_json assignedStandsCopy;
 	{
 		std::lock_guard<std::mutex> lock(assignedStandsMutex_);
@@ -160,12 +115,8 @@ void RampAgent::runUpdate() {
 	}
 
 	if (assignedStandsCopy.empty()) {
-		if (printError) {
-			printError = false; // avoid spamming logs
-			if (firstTime) {
-				firstTime = false;
-			}
-			else {
+		if (printError.exchange(false)) { // avoid spamming logs
+			if (!firstTime.exchange(false)) {
 				DisplayMessage("No assigned stands data received to update tags.", "");
 			}
 		}
@@ -173,21 +124,32 @@ void RampAgent::runUpdate() {
 		for (const auto& [callsign, standName] : lastStandTagMapCopy) {
 			UpdateTagItems(callsign, WHITE, "");
 		}
-		std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);
+		std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
 		lastStandTagMap_.clear();
 		return;
 	}
 
 	std::unordered_map<std::string, std::string> standTagMap;
 
-	auto& assigned = assignedStandsCopy["assignedStands"];
-	assignedStandsCopy["assignedStands"].insert(
-		assignedStandsCopy["assignedStands"].end(),
-		assignedStandsCopy["occupiedStands"].begin(),
-		assignedStandsCopy["occupiedStands"].end()
-	); // display tag item on occupied stands as well
-
 	try {
+		// Safely check if required keys exist
+		if (!assignedStandsCopy.contains("assignedStands") || !assignedStandsCopy["assignedStands"].is_array()) {
+			DisplayMessage("Invalid API response: missing or invalid 'assignedStands' field", "Error");
+			return;
+		}
+		
+		if (!assignedStandsCopy.contains("occupiedStands") || !assignedStandsCopy["occupiedStands"].is_array()) {
+			DisplayMessage("Invalid API response: missing or invalid 'occupiedStands' field", "Error");
+			return;
+		}
+
+		auto& assigned = assignedStandsCopy["assignedStands"];
+		
+		// Merge occupied stands into assigned stands
+		for (auto& occupiedStand : assignedStandsCopy["occupiedStands"]) {
+			assigned.push_back(occupiedStand);
+		}
+
 		for (auto& stand : assigned) {
 			if (!stand.is_object()) continue;
 
@@ -224,9 +186,9 @@ void RampAgent::runUpdate() {
 				remark.clear();
 			}
 
-			// Update only if changed or new
-			if (auto it = lastStandTagMap_.find(callsign);
-				it != lastStandTagMap_.end() && it->second == standName) {
+			// Update only if changed or new - now using the copy which is safe
+			if (auto it = lastStandTagMapCopy.find(callsign);
+				it != lastStandTagMapCopy.end() && it->second == standName) {
 				UpdateTagItems(callsign, WHITE, standName, remark);
 			}
 			else {
@@ -252,21 +214,227 @@ void RampAgent::runUpdate() {
 
 	}
 
-	std::lock_guard<std::mutex> lock2(lastStandTagMapMutex_);
+	std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
 	lastStandTagMap_ = standTagMap;
 }
 
-void RampAgent::OnTimer(int Counter) {
-	if (Counter % 15 == 0) this->runUpdate();
+void RampAgent::workerThread() {
+	// Create a single SSL client instance for all API calls
+	std::string localApiUrl;
+	{
+		std::lock_guard<std::mutex> lock(apiUrlMutex_);
+		localApiUrl = apiUrl_;
+	}
+	
+	// Use unique_ptr so we can recreate the client when URL changes
+	auto cli = std::make_unique<httplib::SSLClient>(localApiUrl, 443);
+	cli->set_connection_timeout(0, 700000); // 700ms
+	cli->set_read_timeout(1, 0);            // 1s
+	cli->set_write_timeout(1, 0);           // 1s
+	
+	while (!m_stop) {
+		// Wait for a fetch request or shutdown signal
+		{
+			std::unique_lock<std::mutex> lock(m_cvMutex);
+			m_cv.wait(lock, [this] { 
+				return m_fetchRequested.load() || !apiRequestQueue_.empty() || m_stop; 
+			});
+			
+			if (m_stop) {
+				break;
+			}
+			
+			// Process periodic fetch if requested
+			if (m_fetchRequested.exchange(false)) {
+				getAllAssignedStands();
+			}
+		}
+		
+		// Process all queued API requests
+		while (true) {
+			ApiRequest request;
+			{
+				std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
+				if (apiRequestQueue_.empty()) {
+					break;
+				}
+				request = apiRequestQueue_.front();
+				apiRequestQueue_.pop();
+			}
+			
+			// Recreate client if API URL changed
+			{
+				std::lock_guard<std::mutex> lock(apiUrlMutex_);
+				if (localApiUrl != apiUrl_) {
+					localApiUrl = apiUrl_;
+					cli = std::make_unique<httplib::SSLClient>(localApiUrl, 443);
+					cli->set_connection_timeout(0, 700000);
+					cli->set_read_timeout(1, 0);
+					cli->set_write_timeout(1, 0);
+				}
+			}
+			
+			// Process the request
+			processApiRequest(*cli, request);
+		}
+	}
 }
 
-void rampAgent::RampAgent::OnControllerPositionUpdate(CController Controller)
-{
+void RampAgent::queueApiRequest(ApiRequestType type, const std::string& icao, const std::string& callsign, const std::string& standName) {
+	ApiRequest request;
+	request.type = type;
+	request.icao = icao;
+	request.callsign = callsign;
+	request.standName = standName;
+	
+	{
+		std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
+		apiRequestQueue_.push(request);
+	}
+	
+	// Wake up worker thread
+	m_cv.notify_one();
+}
+
+void RampAgent::processApiRequest(httplib::SSLClient& cli, const ApiRequest& request) {
+	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
+	
+	switch (request.type) {
+		case ApiRequestType::FETCH_OCCUPANCY:
+		{
+			// This is handled by getAllAssignedStands() which is already implemented
+			break;
+		}
+		
+		case ApiRequestType::FETCH_STANDS:
+		{
+			std::string apiEndpoint = "/api/airports/" + request.icao + "/stands";
+			auto res = cli.Get(apiEndpoint.c_str(), headers);
+			
+			if (res && res->status >= 200 && res->status < 300) {
+				try {
+					if (!res->body.empty()) {
+						nlohmann::ordered_json standsJson = nlohmann::ordered_json::parse(res->body);
+						
+						// Cache the stands data
+						{
+							std::lock_guard<std::mutex> lock(standsDataCacheMutex_);
+							standsDataCache_ = standsJson;
+						}
+						
+						if (!printError.load()) {
+							printError.store(true);
+							queueMessage("Successfully retrieved stands information for " + request.icao);
+						}
+					}
+				}
+				catch (const std::exception& e) {
+					queueMessage("Failed to parse stands data: " + std::string(e.what()));
+				}
+			}
+			else {
+				if (printError.load()) {
+					printError.store(false);
+					queueMessage("Failed to get stands information. HTTP status: " + std::to_string(res ? res->status : 0));
+				}
+			}
+			break;
+		}
+		
+		case ApiRequestType::ASSIGN_STAND:
+		{
+			std::string localCallsign;
+			{
+				std::lock_guard<std::mutex> lock(callsignMutex_);
+				localCallsign = callsign_;
+			}
+			
+			std::string token = generateToken(localCallsign);
+			std::string apiEndpoint = "/api/assign?stand=" + request.standName + 
+			                          "&icao=" + request.icao + 
+			                          "&callsign=" + request.callsign + 
+			                          "&token=" + token + 
+			                          "&client=" + localCallsign;
+			
+			auto res = cli.Get(apiEndpoint.c_str(), headers);
+			
+			if (!res || !(res->status >= 200 && res->status < 300)) {
+				queueMessage("Failed to send manual assign. HTTP status: " + std::to_string(res ? res->status : 0));
+				return;
+			}
+			
+			if (!res->body.empty()) {
+				try {
+					nlohmann::ordered_json dataJson = nlohmann::ordered_json::parse(res->body);
+					
+					if (!dataJson.contains("message")) {
+						queueMessage("Malformed response from server");
+						return;
+					}
+					
+					auto& message = dataJson["message"];
+					if (!message.contains("action") || !message["action"].is_string()) {
+						queueMessage("Malformed response from server");
+						return;
+					}
+					
+					std::string action = message["action"].get<std::string>();
+					
+					if (action == "assign") {
+						{
+							std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
+							lastStandTagMap_[request.callsign] = request.standName;
+						}
+						{
+							std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+							manualAssignedCallsigns_[request.callsign] = request.standName;
+						}
+						UpdateTagItems(request.callsign, WHITE, request.standName);
+						queueMessage("Stand " + request.standName + " assigned to " + request.callsign);
+					}
+					else if (action == "free") {
+						{
+							std::lock_guard<std::mutex> lock(lastStandTagMapMutex_);
+							lastStandTagMap_.erase(request.callsign);
+						}
+						{
+							std::lock_guard<std::mutex> lock(manualAssignedCallsignsMutex_);
+							manualAssignedCallsigns_[request.callsign] = "";
+						}
+						UpdateTagItems(request.callsign, WHITE, "");
+						queueMessage("Stand freed for " + request.callsign);
+					}
+					else {
+						if (message.contains("message") && message["message"].is_string()) {
+							std::string msg = message["message"].get<std::string>();
+							queueMessage("Manual stand rejected: " + msg);
+						} else {
+							queueMessage("Manual stand assignment failed with unknown action: " + action);
+						}
+					}
+				}
+				catch (const std::exception& e) {
+					queueMessage("Failed to parse stand assignment response: " + std::string(e.what()));
+				}
+			}
+			break;
+		}
+	}
+}
+
+void RampAgent::OnTimer(int Counter) {
 	isConnected_ = isConnected();
 	isController_ = isController();
-#ifdef DEV
-	isController_ = true;
-#endif // DEV
+	
+	{
+		std::lock_guard<std::mutex> lock(messageQueueMutex_);
+		for (const auto& msg : messageQueue_) {
+			DisplayMessage(msg, "");
+		}
+		messageQueue_.clear();
+	}
+
+	if (Counter % 15 == 0) this->runUpdate();
 }
 
 std::string RampAgent::toUpper(std::string str)
@@ -306,17 +474,28 @@ void RampAgent::getAllAssignedStands()
 {
 	nlohmann::ordered_json response;
 
-	httplib::SSLClient cli(apiUrl_, 443);
+	// Safely copy callsign and apiUrl
+	std::string localCallsign;
+	std::string localApiUrl;
+	{
+		std::lock_guard<std::mutex> lock(callsignMutex_);
+		localCallsign = callsign_;
+	}
+	{
+		std::lock_guard<std::mutex> lock(apiUrlMutex_);
+		localApiUrl = apiUrl_;
+	}
+
+	httplib::SSLClient cli(localApiUrl, 443);
 	cli.set_connection_timeout(0, 700000); // 700ms
 	cli.set_read_timeout(1, 0);            // 1s
 	cli.set_write_timeout(1, 0);           // 1s
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 
-	auto res = cli.Get("/api/occupancy/?callsign=" + callsign_ , headers);
+	auto res = cli.Get("/api/occupancy/?callsign=" + localCallsign, headers);
 
 	if (res && res->status >= 200 && res->status < 300) {
-		if (!printError) {
-			printError = true; // reset error printing flag on success
+		if (!printError.exchange(true)) { // reset error printing flag on success 
 			queueMessage("Successfully reconnected to Ramp Agent server.");
 		}
 		try {
@@ -333,13 +512,12 @@ void RampAgent::getAllAssignedStands()
 		}
 	}
 	else {
-		if (printError) {
-			printError = false; // avoid spamming logs
-			if (firstTime == false) {
+		if (printError.exchange(false)) {
+			if (firstTime.load() == false) {
 				queueMessage("Failed to retrieve occupied stands data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
 			}
 			else {
-				firstTime = false;
+				firstTime.store(false);
 			}
 		}
 	}
@@ -363,14 +541,18 @@ CFlightPlanControllerAssignedData rampAgent::RampAgent::getControllerAssignedDat
 bool rampAgent::RampAgent::isConnected()
 {
 	bool userIsConnected = this->GetConnectionType() != EuroScopePlugIn::CONNECTION_TYPE_NO;
-	if (!userIsConnected) DisplayMessage("Not connected to network.", "Status");
 	return userIsConnected;
 }
 
 bool rampAgent::RampAgent::isController()
 {
 	bool userIsObserver = std::string_view(this->ControllerMyself().GetCallsign()).ends_with("_OBS") == true || this->ControllerMyself().GetFacility() == 0;
-	callsign_ = std::string(this->ControllerMyself().GetCallsign());
+	
+	{
+		std::lock_guard<std::mutex> lock(callsignMutex_);
+		callsign_ = std::string(this->ControllerMyself().GetCallsign());
+	}
+	
 	return !userIsObserver;
 }
 
@@ -436,7 +618,7 @@ void rampAgent::RampAgent::sortStandList(std::vector<std::string>& standList)
 
 inline std::string rampAgent::RampAgent::generateToken(const std::string& callsign)
 {
-	std::string s = AUTH_SECRET + callsign_;
+	std::string s = AUTH_SECRET + callsign;
 	unsigned char hash[SHA256_DIGEST_LENGTH];
 	SHA256(reinterpret_cast<const unsigned char*>(s.data()), s.size(), hash);
 	std::ostringstream oss;
