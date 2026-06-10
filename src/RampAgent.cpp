@@ -108,7 +108,8 @@ void RampAgent::WorkerThread() {
 	cli->set_connection_timeout(0, 2000000); // 2s
 	cli->set_read_timeout(1, 0);             // 1s
 	cli->set_write_timeout(1, 0);            // 1s
-	//cli->enable_server_certificate_verification(false);
+
+	PopulateICAOStandMap(*cli);
 
 	while (m_stop.load(std::memory_order_acquire) == false) {
 		static size_t counter = 0;
@@ -127,7 +128,8 @@ void RampAgent::WorkerThread() {
 
 
 		// Send assigned stand if controller
-		if (isController_.load(std::memory_order_acquire)){
+		//if (isController_.load(std::memory_order_acquire)){
+		if (true){
 			std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
 			if (pendingAssignRequests_.empty() == false) {
 				for (const auto& [callsign, standInfo] : pendingAssignRequests_) {
@@ -229,7 +231,7 @@ void RampAgent::FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std:
 				remark.clear();
 			}
 
-			Stand standInfo{ .name = standName, .icao = icao, .remark = remark, .occupied = true };
+			Stand standInfo{ .name = standName, .icao = icao, .remark = remark };
 
 			standTagMap[callsign] = standInfo;
 		}
@@ -247,9 +249,167 @@ void RampAgent::FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std:
 	}
 }
 
+void rampAgent::RampAgent::PopulateICAOStandMap(httplib::SSLClient& cli)
+{
+	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
+	auto res = cli.Get("/api/airports/", headers);
+
+	nlohmann::ordered_json response;
+
+	if (res && res->status >= 200 && res->status < 300) {
+		try {
+			if (!res->body.empty()) response = nlohmann::ordered_json::parse(res->body);
+			else {
+				QueueError("Received empty response from Ramp Agent server when parsing compatible airports.");
+				return;
+			}
+		}
+		catch (const nlohmann::json::exception& e) {
+			QueueError("Failed to parse compatible airports data from Ramp Agent server: " + std::string(e.what()));
+			return;
+		}
+		catch (const std::exception& e) {
+			QueueError("Failed to parse compatible airports data from Ramp Agent server: " + std::string(e.what()));
+			return;
+		}
+	}
+	else {
+		QueueError("Failed to retrieve compatible airports data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
+		if (!res) {
+			QueueError("Error details: " + httplib::to_string(res.error()));
+		}
+		return;
+	}
+
+	// Parse response to get list of compatible airports
+	std::vector<std::string> compatibleAirports;
+	try {
+		if (!response.is_array()) {
+			QueueError("Invalid API response: response is not an array");
+			return;
+		}
+		
+
+		for (const auto& airport : response) {
+			if (!airport.is_object()) continue;
+
+			// icao
+			const auto nameIt = airport.find("name");
+			if (nameIt == airport.end() || !nameIt->is_string()) continue;
+			std::string name = nameIt->get<std::string>();
+			compatibleAirports.push_back(name);
+		}
+	}
+	catch (const nlohmann::json::exception& e) {
+		QueueError("runScopeUpdate: failed to process compatible airports: " + std::string(e.what()));
+		return;
+	}
+	catch (const std::exception& e) {
+		QueueError("runScopeUpdate: failed to process compatible airports: " + std::string(e.what()));
+		return;
+	}
+
+
+	// For each compatible airport, fetch the stands and populate airportStandsCache_
+	for (const auto& icao : compatibleAirports) {
+		auto res = cli.Get(("/api/airports/" + icao + "/stands").c_str(), headers);
+		if (res && res->status >= 200 && res->status < 300) {
+			try {
+				if (!res->body.empty()) {
+					nlohmann::ordered_json standsJson = nlohmann::ordered_json::parse(res->body);
+					std::vector<Stand> stands;
+					for (const auto& [standName, standInfo] : standsJson.items()) {
+						if (!standInfo.is_object()) continue;
+						stands.push_back(Stand{ .name = standName, .icao = icao, .remark = "" });
+					}
+					std::lock_guard<std::mutex> lock(standsCacheMutex_);
+					airportStandsCache_[icao] = std::move(stands);
+				}
+				else {
+					QueueError("Received empty response from Ramp Agent server when fetching stands for airport " + icao);
+				}
+			}
+			catch (const nlohmann::json::exception& e) {
+				QueueError("Failed to parse stands data for airport " + icao + " from Ramp Agent server: " + std::string(e.what()));
+			}
+			catch (const std::exception& e) {
+				QueueError("Failed to parse stands data for airport " + icao + " from Ramp Agent server: " + std::string(e.what()));
+			}
+		}
+		else {
+			QueueError("Failed to retrieve stands data for airport " + icao + " from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
+			if (!res) {
+				QueueError("Error details: " + httplib::to_string(res.error()));
+			}
+		}
+	}
+}
+
 void RampAgent::SendStandAssignementRequest(httplib::SSLClient& cli, const std::string& userCallsign, const std::string& callsign, const Stand& standInfo)
 {
-	//TODO: implement
+	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
+	
+	std::string token = GenerateToken(userCallsign);
+	std::string apiEndpoint = "/api/assign?stand=" + standInfo.name +
+		"&icao=" + standInfo.icao +
+		"&callsign=" + callsign +
+		"&token=" + token +
+		"&client=" + userCallsign;
+	
+	auto res = cli.Get(apiEndpoint.c_str(), headers);
+	
+	if (!res || !(res->status >= 200 && res->status < 300)) {
+		QueueError("Failed to send manual assign. HTTP status: " + std::to_string(res ? res->status : 0));
+		return;
+	}
+	
+	if (!res->body.empty()) {
+		try {
+			nlohmann::ordered_json dataJson = nlohmann::ordered_json::parse(res->body);
+
+			if (!dataJson.contains("message")) {
+				QueueMessage("Malformed response from server");
+				return;
+			}
+
+			auto& message = dataJson["message"];
+			if (!message.contains("action") || !message["action"].is_string()) {
+				QueueMessage("Malformed response from server");
+				return;
+			}
+
+			std::string action = message["action"].get<std::string>();
+
+			if (action == "assign") {
+				// Update local cache to reflect the new assignment
+				std::lock_guard<std::mutex> lock(standsCacheMutex_);
+				standsCache_[callsign] = standInfo;
+				QueueMessage("Stand " + standInfo.name + " assigned to " + callsign);
+			}
+			else if (action == "free") {
+				{
+					std::lock_guard<std::mutex> lock(standsCacheMutex_);
+					standsCache_.erase(callsign);
+				}
+				QueueMessage("Stand freed for " + callsign);
+			}
+			else {
+				if (message.contains("message") && message["message"].is_string()) {
+					std::string msg = message["message"].get<std::string>();
+					QueueMessage("Manual stand rejected: " + msg);
+				}
+				else {
+					QueueMessage("Manual stand assignment failed with unknown action: " + action);
+				}
+			}
+		}
+		catch (const nlohmann::json::exception& e) {
+			QueueMessage("Failed to parse stand assignment response: " + std::string(e.what()));
+		}
+		catch (const std::exception& e) {
+			QueueMessage("Failed to parse stand assignment response: " + std::string(e.what()));
+		}
+	}
 }
 
 void RampAgent::OnTimer(int Counter) {
@@ -268,6 +428,9 @@ void RampAgent::OnTimer(int Counter) {
 		}
 		messageQueue_.clear();
 	}
+
+	// Update flight strip annotations (done here to be independant from tag items)
+	UpdateFlightStripAnnotations();
 }
 
 bool RampAgent::IsConnected()
@@ -276,12 +439,52 @@ bool RampAgent::IsConnected()
 	return userIsConnected;
 }
 
+void rampAgent::RampAgent::UpdateFlightStripAnnotations()
+{
+	std::lock_guard<std::mutex> lock(standsCacheMutex_);
+	CRadarTarget rt = this->RadarTargetSelectFirst();
+	while (rt.IsValid()) {
+		bool isOnGround = rt.IsValid() && rt.GetGS() <= ON_GROUND_SPEED_THRESHOLD; // Only update strip if target is on the ground
+		if (!isOnGround) {
+			rt = this->RadarTargetSelectNext(rt);
+			continue;
+		}
+
+
+		CFlightPlan fp = rt.GetCorrelatedFlightPlan();
+		if (fp.IsValid() == false) {
+			rt = this->RadarTargetSelectNext(rt);
+			continue;
+		}
+
+		bool hasStand = standsCache_.contains(rt.GetCallsign()); // Only update if information available
+
+		CFlightPlanControllerAssignedData assignedData = fp.GetControllerAssignedData();
+		const std::string standName = hasStand ? standsCache_[rt.GetCallsign()].name : "";
+		std::string truncatedStand = standName.length() > 23 ? standName.substr(0, 23) : standName; // Truncate to 23 characters to ensure it fits in the annotation field
+
+		// Only update if value different to avoid unnecessary controllerAssignedData updates
+		if (assignedData.GetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX) != truncatedStand) {
+			assignedData.SetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX, truncatedStand.c_str());
+		}
+		
+		const std::string remark = hasStand ? standsCache_[rt.GetCallsign()].remark : "";
+		std::string truncatedRemark = remark.length() > 23 ? remark.substr(0, 23) : remark; // Truncate to 23 characters to ensure it fits in the annotation field
+		// Only update if value different to avoid unnecessary controllerAssignedData updates
+		if (assignedData.GetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX) != truncatedRemark) {
+			assignedData.SetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX, truncatedRemark.c_str());
+		}
+
+		rt = this->RadarTargetSelectNext(rt);
+	}
+}
+
 bool RampAgent::IsController()
 {
 	const std::string callsign = this->ControllerMyself().GetCallsign();
 	if (callsign.size() < 3) return false;
 
-	bool userIsObserver =  callsign.substr(callsign.size() - 3) == "OBS" || this->ControllerMyself().GetFacility() == 0;
+	bool userIsObserver = callsign.substr(callsign.size() - 3) == "OBS" || this->ControllerMyself().GetFacility() == 0;
 	
 	std::lock_guard<std::mutex> lock(userCallsignMutex_);
 	userCallsign_ = callsign; // Lock is held by calling function

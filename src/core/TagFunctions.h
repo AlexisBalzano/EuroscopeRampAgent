@@ -14,56 +14,80 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 	std::ignore = itemString;
 	std::ignore = functionId;
 
-	//// Check if we're a controller and connected (these are set by OnTimer)
-	//if (isController_ == false || isConnected_ == false) return; // If OBS, can't assign stands
+	// Check if we're a controller and connected (these are set by OnTimer)
+	//if (!isConnected_.load(std::memory_order_acquire) || !isController_.load(std::memory_order_acquire)) return;
 
-	//auto fp = FlightPlanSelectASEL();
-	//std::string callsign = toUpper(fp.GetCallsign());
-	//std::string icao = toUpper(fp.GetFlightPlanData().GetDestination());
+	auto fp = FlightPlanSelectASEL();
+	std::string callsign = ToUpper(fp.GetCallsign());
+	std::string icao = ToUpper(fp.GetFlightPlanData().GetDestination());
 
-	//if (icao.substr(0, 2) != "LF") {
-	//	DisplayMessage("Stand assignment only available for French airports.", "");
-	//	return; // Only French airports supported
-	//}
+	std::unordered_map<std::string, std::vector<Stand>> localAirportStandsCache;
+	{
+		std::lock_guard<std::mutex> lock(standsCacheMutex_);
+		localAirportStandsCache = airportStandsCache_;
+	}
 
-	//switch (static_cast<TagActionID>(functionId)) {
-	//case TagActionID::OpenMENU:
-	//{
-	//	OpenPopupList(area, icao.c_str(), 1);
+	if (!localAirportStandsCache.contains(icao)) {
+		DisplayError(std::format("{} is not supported.", icao));
+		return;
+	}
 
-	//	updateStandMenuButtons(icao);
+	switch (static_cast<TagActionID>(functionId)) {
+	case TagActionID::OpenMENU:
+	{
+		OpenPopupList(area, icao.c_str(), 1);
 
-	//	for (const auto& button : menuButtons_) {
-	//		AddPopupListElement(button.c_str(), NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, false);
-	//	}
-	//	AddPopupListElement("None", NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, true);
-	//	AddPopupListElement("[---]", NULL, static_cast<int>(TagActionID::AssignSTAND), false, 2, false, true);
-	//	break;
-	//}
-	//case TagActionID::AssignSTAND:
-	//{
-	//	if (itemString == nullptr || strlen(itemString) == 0) {
-	//		DisplayMessage("No stand selected for assignment.", "");
-	//		return;
-	//	}
+		for (const auto& stand : airportStandsCache_[icao]) {
+			AddPopupListElement(stand.name.c_str(), NULL, static_cast<int>(TagActionID::AssignStand), false, 2, false, false);
+		}
+		AddPopupListElement("None", NULL, static_cast<int>(TagActionID::AssignStand), false, 2, false, true);
+		AddPopupListElement("[---]", NULL, static_cast<int>(TagActionID::AssignStand), false, 2, false, true);
+		break;
+	}
+	case TagActionID::AssignStand:
+	{
+		if (itemString == nullptr || strlen(itemString) == 0) {
+			DisplayMessage("No stand selected for assignment.");
+			return;
+		}
 
-	//	if (itemString == std::string("[---]")) {
-	//		OpenPopupEdit(area, static_cast<int>(TagActionID::AssignSTAND), "---");
-	//		return;
-	//	}
+		// Handle stand freeing
+		if (itemString == std::string("None")) {
+			// Add request to queue that will be processed by worker thread
+			// Clear flight strip annotation immediately for better UX; it will be set again by ES if the API request fails and the stand is still assigned
+			CFlightPlanControllerAssignedData assignedData = fp.GetControllerAssignedData();
+			assignedData.SetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX, ""); // Clear the annotation field on the flight strip immediately for better UX
+			assignedData.SetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX, ""); // Clear the annotation field on the flight strip immediately for better UX
+			std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
+			pendingAssignRequests_[callsign] = Stand{ .name = "None", .icao = icao, .remark = ""};
+			return;
+		}
 
-	//	// Execute synchronously since this is user-initiated and they expect immediate feedback
-	//	// Don't use m_thread as it's reserved for the background worker
-	//	assignStandToAircraft(callsign, std::string(itemString), icao);
-	//	break;
-	//}
-	//default:
-	//	break;
-	//}
+		if (itemString == std::string("[---]")) {
+			OpenPopupEdit(area, static_cast<int>(TagActionID::AssignStand), "---");
+			return;
+		}
+
+		// Handle manual entry
+		bool isStandCorrect = false;
+		std::vector<Stand> standsAtAirport = localAirportStandsCache[icao];
+		for (const auto& stand : standsAtAirport) {
+			if (stand.name == itemString) {
+				isStandCorrect = true;
+				break;
+			}
+		}
+		if (!isStandCorrect) {
+			DisplayError("Invalid stand selected: " + std::string(itemString));
+			return;
+		}
+
+		// Add request to queue that will be processed by worker thread
+		std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
+		pendingAssignRequests_[callsign] = Stand{ .name = itemString, .icao = icao, .remark = ""};
+		break;
+	}
+	default:
+		break;
+	}
 }
-
-//void RampAgent::assignStandToAircraft(const std::string& callsign, const std::string& standName, std::string menuIcao)
-//{
-//	// Queue the assignment request to be processed by worker thread
-//	queueApiRequest(ApiRequestType::ASSIGN_STAND, menuIcao, callsign, standName);
-//}

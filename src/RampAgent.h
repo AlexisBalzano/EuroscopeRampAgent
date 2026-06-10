@@ -18,7 +18,6 @@ namespace rampAgent {
 		std::string name;
 		std::string icao;
 		std::string remark;
-		bool occupied;
 	};
 
 	struct TagItemInfo {
@@ -29,11 +28,12 @@ namespace rampAgent {
 
 	enum TagItemID : int {
 		STAND = 0,
-		REMARK = 1
+		REMARK,
 	};
 
 	enum TagActionID : int {
 		OpenMENU = 0,
+		AssignStand,
 	};
 
 
@@ -75,9 +75,11 @@ namespace rampAgent {
 	private:
 		bool IsController();
 		bool IsConnected();
+		void UpdateFlightStripAnnotations();
 
 		void WorkerThread();
 		void FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std::string& userCallsign);
+		void PopulateICAOStandMap(httplib::SSLClient& cli);
 		void SendStandAssignementRequest(httplib::SSLClient& cli, const std::string& userCallsign, const std::string& callsign, const Stand& standInfo);
 		const std::string GenerateToken(const std::string& controllerCallsign);
 
