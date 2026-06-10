@@ -44,31 +44,11 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 
 	if (sub == "version")
 	{
-		DisplayMessage(std::string("RampAgent version: ") + RAMPAGENT_VERSION, "");
+		DisplayMessage(std::string("RampAgent version: ") + PLUGIN_VERSION);
 		return true;
 	}
-	if (sub == "url")
-	{
-		std::string url;
-		iss >> url;
-		if (url.empty())
-		{
-			DisplayMessage("Usage: .ramp url <domain (no https://)>", "");
-			return false;
-		}
-		changeApiUrl(url);
-		DisplayMessage("API URL set to " + url, "");
-		return true;
-	}
-	if (sub == "disconnect")
-	{
-		isConnected_ = false;
-		isController_ = false;
-		callsign_.clear();
-		DisplayMessage("Disconnected.");
-		return true;
-	}
-	DisplayMessage("Commands: .rampAgent version / .rampAgent disconnect / .rampAgent url <url>", "");
+
+	DisplayMessage("Commands: .rampAgent version");
 	return true;
 }
 

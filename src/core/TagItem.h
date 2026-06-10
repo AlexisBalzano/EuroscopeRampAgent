@@ -1,5 +1,6 @@
 #pragma once
 #include "RampAgent.h"
+#include "Helpers.h"
 
 using namespace rampAgent;
 
@@ -8,41 +9,9 @@ void RampAgent::RegisterTagItems() {
 	RegisterTagItemType("REMARK", static_cast<int>(TagItemID::REMARK));
 }
 
-inline void RampAgent::UpdateTagItems(std::string callsign, COLORREF color, std::string standName, std::string remark)
-{
-	std::lock_guard<std::mutex> lock(tagItemValueMapMutex_);
-	TagItemInfo tagInfo;
-	tagInfo.standName = standName;
-	tagInfo.remark = remark;
-	tagInfo.color = color;
-
-	tagItemValueMap_[callsign] = tagInfo;
-
-	// Set scratchpad value for the stand to appear inside vSMR when aircraft is on ground (ie speed < 60kt)
-	std::pair<bool, CRadarTarget> aircraft = aircraftExists(callsign);
-
-	if (aircraft.first == false) return; // Aircraft not found, skip
-
-	if (aircraft.second.GetGS() > 60) return; // Aircraft is not on ground, skip
-
-	try {
-		CFlightPlanControllerAssignedData assignedData = getControllerAssignedData(callsign);
-		// Truncate to 23 characters to ensure it fits in the annotation field
-		std::string truncatedStand = standName.length() > 23 ? standName.substr(0, 23) : standName;
-		std::string truncatedRemark = remark.length() > 23 ? remark.substr(0, 23) : remark;
-		
-		assignedData.SetFlightStripAnnotation(3, truncatedStand.c_str());
-		assignedData.SetFlightStripAnnotation(4, truncatedRemark.c_str());
-	}
-	catch (const std::exception& e) {
-		// Silently fail - EuroScope API may throw if flight plan is invalid
-	}
-}
-
 inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget, int ItemCode, int TagData, char sItemString[16], int* pColorCode, COLORREF* pRGB, double* pFontSize)
 {
-	std::lock_guard<std::mutex> lock(tagItemValueMapMutex_);
-	std::ignore = RadarTarget;
+	std::lock_guard<std::mutex> lock(standsCacheMutex_);
 	std::ignore = TagData;
 	std::ignore = pRGB;
 	std::ignore = pFontSize;
@@ -59,37 +28,49 @@ inline void RampAgent::OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, Eur
 		return; // Invalid callsign
 	}
 	
-	std::string callsign = toUpper(callsignPtr);
+	std::string callsign = ToUpper(callsignPtr);
 
-	if (tagItemValueMap_.find(callsign) == tagItemValueMap_.end()) {
+	if (!standsCache_.contains(callsign)) {
 		return; // No tag info found for this callsign
 	}
+
+	bool shouldUpdateStrip = RadarTarget.IsValid() && RadarTarget.GetGS() <= ON_GROUND_SPEED_THRESHOLD; // Only update strip if target is on the ground
 
 	try {
 		switch (static_cast<TagItemID>(ItemCode)) {
 			case TagItemID::STAND:
 			{
-				std::string standName = tagItemValueMap_[callsign].standName;
+				std::string standName = standsCache_[callsign].name;
 				// Ensure we don't overflow the 16-byte buffer (15 chars + null terminator)
 				size_t maxLen = std::min(standName.length(), size_t(15));
 				std::snprintf(sItemString, 16, "%.*s", static_cast<int>(maxLen), standName.c_str());
-				*pRGB = tagItemValueMap_[callsign].color;
+				*pRGB = RGB(255, 255, 255);
+				if (shouldUpdateStrip) {
+					CFlightPlanControllerAssignedData assignedData = FlightPlan.GetControllerAssignedData();
+					std::string truncatedStand = standName.length() > 23 ? standName.substr(0, 23) : standName; // Truncate to 23 characters to ensure it fits in the annotation field
+					assignedData.SetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX, truncatedStand.c_str());
+				}
 				break;
 			}
 			case TagItemID::REMARK:
 			{
-				std::string remark = tagItemValueMap_[callsign].remark;
+				std::string remark = standsCache_[callsign].remark;
 				// Ensure we don't overflow the 16-byte buffer (15 chars + null terminator)
 				size_t maxLen = std::min(remark.length(), size_t(15));
 				std::snprintf(sItemString, 16, "%.*s", static_cast<int>(maxLen), remark.c_str());
-				*pRGB = tagItemValueMap_[callsign].color;
+				*pRGB = RGB(255, 255, 255);
+				if (shouldUpdateStrip) {
+					CFlightPlanControllerAssignedData assignedData = FlightPlan.GetControllerAssignedData();
+					std::string truncatedRemark = remark.length() > 23 ? remark.substr(0, 23) : remark; // Truncate to 23 characters to ensure it fits in the annotation field
+					assignedData.SetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX, truncatedRemark.c_str());
+				}
 				break;
 			}
 			default:
 				break;
 		}
 	}
-	catch (const std::exception& e) {
+	catch (...) {
 		// Silently fail - don't crash EuroScope
 	}
 }
