@@ -26,6 +26,15 @@ namespace rampAgent {
 		COLORREF color;
 	};
 
+	// What UpdateFlightStripAnnotations last pushed for a callsign. Euroscope rejecting a
+	// write leaves the annotation unchanged, so without remembering the attempt the
+	// "value differs" guard stays true and we retry it on every single tick.
+	struct AnnotationWrite {
+		std::string stand;
+		std::string remark;
+		bool rejected = false;
+	};
+
 	enum TagItemID : int {
 		STAND = 0,
 		REMARK,
@@ -43,6 +52,13 @@ namespace rampAgent {
 		static constexpr int ON_GROUND_SPEED_THRESHOLD = 70; // kts
 		static constexpr int STAND_FLIGHT_STRIP_INDEX = 3;
 		static constexpr int REMARK_FLIGHT_STRIP_INDEX = 4;
+		// The SDK documents no maximum for SetFlightStripAnnotation and the previous 23
+		// had no stated source. 15 is the SDK's own budget for plugin supplied tag text
+		// (OnGetTagItem's char sItemString[16]) and is already what TagItem.h truncates
+		// to, so both output paths now agree on one documented number. The write is also
+		// verified in UpdateFlightStripAnnotations, so a shorter real limit gets detected
+		// rather than assumed away.
+		static constexpr size_t MAX_ANNOTATION_LENGTH = 15;
 		static constexpr const char* API_URL = "rampagent.vatsim.fr";
 
 	public:
@@ -79,7 +95,8 @@ namespace rampAgent {
 
 		void WorkerThread();
 		void FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std::string& userCallsign);
-		void PopulateICAOStandMap(httplib::SSLClient& cli);
+		bool PopulateICAOStandMap(httplib::SSLClient& cli); // True once every compatible airport is cached
+		bool ReportStandMapFailure(const std::string& reason); // Always returns false, for use as a return value
 		void SendStandAssignementRequest(httplib::SSLClient& cli, const std::string& userCallsign, const std::string& callsign, const Stand& standInfo);
 		const std::string GenerateToken(const std::string& controllerCallsign);
 
@@ -87,7 +104,13 @@ namespace rampAgent {
 		// Plugin state
 		bool initialized_ = false;
 		bool printError = true;
+		bool standMapErrorReported_ = false; // Worker thread only; suppresses repeats while retrying
 		std::atomic<bool> m_stop{false};
+		// Lets Shutdown wake the worker out of its idle wait instead of sitting through
+		// the remainder of it. m_stop is written under m_stopMutex so the worker cannot
+		// evaluate the predicate and miss the notification in between.
+		std::mutex m_stopMutex;
+		std::condition_variable m_stopCv;
 		std::thread m_thread;
 
 
@@ -105,6 +128,10 @@ namespace rampAgent {
 		std::mutex standsCacheMutex_;
 		std::unordered_map<std::string, Stand> standsCache_; // Callsign -> Stand info
 		std::unordered_map<std::string, std::vector<Stand>> airportStandsCache_; // ICAO -> List of stands at the airport
+
+		// Flight strip annotation state. Touched only from OnTimer on the main thread, so
+		// it needs no mutex. Rebuilt on every sweep, so departed aircraft drop out.
+		std::unordered_map<std::string, AnnotationWrite> lastAnnotationWrite_; // Callsign -> last attempted write
 
 		// API request management
 		std::mutex apiRequestQueueMutex_;

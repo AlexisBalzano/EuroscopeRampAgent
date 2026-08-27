@@ -13,6 +13,16 @@ inline std::string ToUpper(std::string str)
 }
 
 /**
+* @brief Wrap a C string returned by the Euroscope SDK, which may be null on an invalid object.
+* @param str The C string to wrap, possibly nullptr.
+* @return The string contents, or an empty string if the pointer is null.
+*/
+inline std::string SafeString(const char* str)
+{
+	return str != nullptr ? std::string(str) : std::string();
+}
+
+/**
 * @brief Sort a list of stand names in a natural order, considering numeric prefixes and letter suffixes.
 * @param standList The list of stand names to sort. The sorting is done in-place.
 */

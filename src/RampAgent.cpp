@@ -60,7 +60,10 @@ void RampAgent::Initialize()
 	}
 	catch (const std::exception& e)
 	{
-		DisplayError("Failed to initialize Ramp Agent: " + std::string(e.what()));
+		// Queued, not displayed: Initialize runs from the constructor, so Euroscope has
+		// not yet been handed the instance and cannot be called back into. OnTimer drains
+		// this once we are registered.
+		QueueError("Failed to initialize Ramp Agent: " + std::string(e.what()));
 	}
 }
 
@@ -71,14 +74,22 @@ void RampAgent::Shutdown()
 		initialized_ = false;
 	}
 	
-	// Signal worker thread to stop with proper memory ordering
-	m_stop.store(true, std::memory_order_release);
-	
+	// Signal worker thread to stop with proper memory ordering. Written under m_stopMutex
+	// so the worker cannot test the predicate and then start waiting past the notify.
+	{
+		std::lock_guard<std::mutex> lock(m_stopMutex);
+		m_stop.store(true, std::memory_order_release);
+	}
+	m_stopCv.notify_all();
+
 	// Wait for worker thread to finish
 	if (m_thread.joinable())
 		m_thread.join();
 
-	DisplayMessage("Ramp Agent shutdown complete");
+	// Deliberately silent. Shutdown only runs from ~RampAgent, itself reached from
+	// EuroScopePlugInExit, so DisplayUserMessage here calls into Euroscope while it is
+	// unregistering us - a well known crash on unload. Nobody reads a shutdown notice in
+	// a closing chat window anyway.
 }
 
 void RampAgent::DisplayMessage(const std::string& message) {
@@ -109,11 +120,24 @@ void RampAgent::WorkerThread() {
 	cli->set_read_timeout(1, 0);             // 1s
 	cli->set_write_timeout(1, 0);            // 1s
 
-	PopulateICAOStandMap(*cli);
+	// Retried until it succeeds. A network hiccup while Euroscope was starting used to
+	// leave airportStandsCache_ empty for the whole session: every stand menu answered
+	// "not supported" and the only way back was restarting Euroscope.
+	bool standMapReady = PopulateICAOStandMap(*cli);
+	std::chrono::seconds populateBackoff{ 5 };
+	auto nextPopulateAttempt = std::chrono::steady_clock::now() + populateBackoff;
 
 	while (m_stop.load(std::memory_order_acquire) == false) {
 		static size_t counter = 0;
 
+		if (standMapReady == false && std::chrono::steady_clock::now() >= nextPopulateAttempt) {
+			standMapReady = PopulateICAOStandMap(*cli);
+			if (standMapReady == false) {
+				// Backs off to a 5 minute ceiling, so a long outage costs little
+				populateBackoff = std::min(populateBackoff * 2, std::chrono::seconds{ 300 });
+				nextPopulateAttempt = std::chrono::steady_clock::now() + populateBackoff;
+			}
+		}
 
 		std::string userCallsign;
 		{
@@ -139,14 +163,24 @@ void RampAgent::WorkerThread() {
 		}
 
 		++counter;
-		std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Avoid busy waiting
+
+		// Avoid busy waiting, but stay interruptible: an unrestartable 100ms sleep meant
+		// Shutdown had to wait it out on top of any request already in flight.
+		std::unique_lock<std::mutex> lock(m_stopMutex);
+		m_stopCv.wait_for(lock, std::chrono::milliseconds(100),
+			[this] { return m_stop.load(std::memory_order_acquire); });
 	}
 }
 
 void RampAgent::FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std::string& userCallsign)
 {
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
-	auto res = cli.Get("/api/occupancy/?callsign=" + userCallsign, headers);
+
+	// Percent-encoded rather than concatenated: the callsign comes from Euroscope, and
+	// anything reserved in it would otherwise change the shape of the query.
+	const std::string apiEndpoint = "/api/occupancy/?callsign=" +
+		httplib::encode_query_component(userCallsign, false);
+	auto res = cli.Get(apiEndpoint, headers);
 
 	nlohmann::ordered_json response;
 
@@ -248,7 +282,18 @@ void RampAgent::FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std:
 	}
 }
 
-void rampAgent::RampAgent::PopulateICAOStandMap(httplib::SSLClient& cli)
+bool RampAgent::ReportStandMapFailure(const std::string& reason)
+{
+	// One message per outage: not one per failed airport, and not one per retry. Cleared
+	// again on success, so a later outage is still reported.
+	if (standMapErrorReported_ == false) {
+		standMapErrorReported_ = true;
+		QueueError("Could not load stand data (" + reason + "). Retrying in the background.");
+	}
+	return false;
+}
+
+bool rampAgent::RampAgent::PopulateICAOStandMap(httplib::SSLClient& cli)
 {
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 	auto res = cli.Get("/api/airports/", headers);
@@ -258,36 +303,25 @@ void rampAgent::RampAgent::PopulateICAOStandMap(httplib::SSLClient& cli)
 	if (res && res->status >= 200 && res->status < 300) {
 		try {
 			if (!res->body.empty()) response = nlohmann::ordered_json::parse(res->body);
-			else {
-				QueueError("Received empty response from Ramp Agent server when parsing compatible airports.");
-				return;
-			}
+			else return ReportStandMapFailure("empty compatible airports response");
 		}
 		catch (const nlohmann::json::exception& e) {
-			QueueError("Failed to parse compatible airports data from Ramp Agent server: " + std::string(e.what()));
-			return;
+			return ReportStandMapFailure("unparseable compatible airports: " + std::string(e.what()));
 		}
 		catch (const std::exception& e) {
-			QueueError("Failed to parse compatible airports data from Ramp Agent server: " + std::string(e.what()));
-			return;
+			return ReportStandMapFailure("unparseable compatible airports: " + std::string(e.what()));
 		}
 	}
 	else {
-		QueueError("Failed to retrieve compatible airports data from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
-		if (!res) {
-			QueueError("Error details: " + httplib::to_string(res.error()));
-		}
-		return;
+		return ReportStandMapFailure("compatible airports request failed, HTTP status " +
+			std::to_string(res ? res->status : 0) +
+			(res ? "" : ", " + httplib::to_string(res.error())));
 	}
 
 	// Parse response to get list of compatible airports
 	std::vector<std::string> compatibleAirports;
 	try {
-		if (!response.is_array()) {
-			QueueError("Invalid API response: response is not an array");
-			return;
-		}
-		
+		if (!response.is_array()) return ReportStandMapFailure("compatible airports response is not an array");
 
 		for (const auto& airport : response) {
 			if (!airport.is_object()) continue;
@@ -300,48 +334,70 @@ void rampAgent::RampAgent::PopulateICAOStandMap(httplib::SSLClient& cli)
 		}
 	}
 	catch (const nlohmann::json::exception& e) {
-		QueueError("runScopeUpdate: failed to process compatible airports: " + std::string(e.what()));
-		return;
+		return ReportStandMapFailure("could not process compatible airports: " + std::string(e.what()));
 	}
 	catch (const std::exception& e) {
-		QueueError("runScopeUpdate: failed to process compatible airports: " + std::string(e.what()));
-		return;
+		return ReportStandMapFailure("could not process compatible airports: " + std::string(e.what()));
 	}
 
 
-	// For each compatible airport, fetch the stands and populate airportStandsCache_
+	// For each compatible airport, fetch the stands and populate airportStandsCache_.
+	// Failures are counted rather than reported individually: this is retried, so one
+	// message per airport per attempt would bury the chat window.
+	size_t unavailable = 0;
+
 	for (const auto& icao : compatibleAirports) {
-		auto res = cli.Get(("/api/airports/" + icao + "/stands").c_str(), headers);
-		if (res && res->status >= 200 && res->status < 300) {
+		// These run sequentially, each up to 2s connect + 1s read. Against a slow or
+		// unreachable API that is minutes of work, and Shutdown joins this thread - so
+		// give up as soon as we are asked to, rather than blocking Euroscope's unload.
+		if (m_stop.load(std::memory_order_acquire)) return false;
+
+		// Skip what a previous attempt already fetched, so a retry only chases the gaps
+		{
+			std::lock_guard<std::mutex> lock(standsCacheMutex_);
+			if (airportStandsCache_.contains(icao)) continue;
+		}
+
+		// Same reasoning as the query parameters, but this one lands in the path, so a
+		// stray '/' or '?' in an airport name would restructure the request rather than
+		// just corrupt one value. Only the ICAO is encoded; the surrounding separators
+		// are ours and must stay literal.
+		const std::string standsEndpoint = "/api/airports/" +
+			httplib::encode_path_component(icao) + "/stands";
+		auto standsRes = cli.Get(standsEndpoint, headers);
+
+		if (standsRes && standsRes->status >= 200 && standsRes->status < 300 && !standsRes->body.empty()) {
 			try {
-				if (!res->body.empty()) {
-					nlohmann::ordered_json standsJson = nlohmann::ordered_json::parse(res->body);
-					std::vector<Stand> stands;
-					for (const auto& [standName, standInfo] : standsJson.items()) {
-						if (!standInfo.is_object()) continue;
-						stands.push_back(Stand{ .name = standName, .icao = icao, .remark = "" });
-					}
-					std::lock_guard<std::mutex> lock(standsCacheMutex_);
-					airportStandsCache_[icao] = std::move(stands);
+				nlohmann::ordered_json standsJson = nlohmann::ordered_json::parse(standsRes->body);
+				std::vector<Stand> stands;
+				for (const auto& [standName, standInfo] : standsJson.items()) {
+					if (!standInfo.is_object()) continue;
+					stands.push_back(Stand{ .name = standName, .icao = icao, .remark = "" });
 				}
-				else {
-					QueueError("Received empty response from Ramp Agent server when fetching stands for airport " + icao);
-				}
+				std::lock_guard<std::mutex> lock(standsCacheMutex_);
+				airportStandsCache_[icao] = std::move(stands);
 			}
-			catch (const nlohmann::json::exception& e) {
-				QueueError("Failed to parse stands data for airport " + icao + " from Ramp Agent server: " + std::string(e.what()));
-			}
-			catch (const std::exception& e) {
-				QueueError("Failed to parse stands data for airport " + icao + " from Ramp Agent server: " + std::string(e.what()));
+			catch (const std::exception&) {
+				++unavailable; // Retried on the next attempt
 			}
 		}
 		else {
-			QueueError("Failed to retrieve stands data for airport " + icao + " from Ramp Agent server. HTTP status: " + std::to_string(res ? res->status : 0));
-			if (!res) {
-				QueueError("Error details: " + httplib::to_string(res.error()));
-			}
+			++unavailable;
 		}
 	}
+
+	if (unavailable != 0) {
+		return ReportStandMapFailure(std::to_string(unavailable) + " of " +
+			std::to_string(compatibleAirports.size()) + " airports unavailable");
+	}
+
+	// Only announced when it follows a failure, so a clean start stays quiet
+	if (standMapErrorReported_) {
+		standMapErrorReported_ = false;
+		QueueMessage("Stand data loaded for " + std::to_string(compatibleAirports.size()) + " airports.");
+	}
+
+	return true;
 }
 
 void RampAgent::SendStandAssignementRequest(httplib::SSLClient& cli, const std::string& userCallsign, const std::string& callsign, const Stand& standInfo)
@@ -349,13 +405,23 @@ void RampAgent::SendStandAssignementRequest(httplib::SSLClient& cli, const std::
 	httplib::Headers headers = { {"User-Agent", "EuroscopeRampAgent"} };
 	
 	std::string token = GenerateToken(userCallsign);
-	std::string apiEndpoint = "/api/assign?stand=" + standInfo.name +
-		"&icao=" + standInfo.icao +
-		"&callsign=" + callsign +
-		"&token=" + token +
-		"&client=" + userCallsign;
-	
-	auto res = cli.Get(apiEndpoint.c_str(), headers);
+
+	// Percent-encoded rather than concatenated: stand names come from the API and
+	// callsigns from Euroscope, so a space, '&', '#' or '%' in either would truncate the
+	// request or inject an extra query parameter. space_as_plus is off, so a space
+	// becomes %20 - decoded by any server - rather than '+', which only form-style query
+	// parsers translate back.
+	const auto encode = [](const std::string& value) {
+		return httplib::encode_query_component(value, false);
+	};
+
+	const std::string apiEndpoint = "/api/assign?stand=" + encode(standInfo.name) +
+		"&icao=" + encode(standInfo.icao) +
+		"&callsign=" + encode(callsign) +
+		"&token=" + encode(token) +
+		"&client=" + encode(userCallsign);
+
+	auto res = cli.Get(apiEndpoint, headers);
 	
 	if (!res || !(res->status >= 200 && res->status < 300)) {
 		QueueError("Failed to send manual assign. HTTP status: " + std::to_string(res ? res->status : 0));
@@ -440,15 +506,35 @@ bool RampAgent::IsConnected()
 
 void rampAgent::RampAgent::UpdateFlightStripAnnotations()
 {
-	std::lock_guard<std::mutex> lock(standsCacheMutex_);
+	// Writing controller assigned data needs an active controller connection. Without one
+	// SetFlightStripAnnotation fails and leaves the annotation untouched, so the "value
+	// differs" guard below stays true and every on ground aircraft is retried every tick.
+	if (isConnected_.load(std::memory_order_acquire) == false ||
+		isController_.load(std::memory_order_acquire) == false) {
+		lastAnnotationWrite_.clear(); // Start clean on the next connection
+		return;
+	}
+
+	// Snapshot the cache and release the lock before calling into Euroscope. OnGetTagItem
+	// takes this same non-recursive mutex on this same thread, so holding it across SDK
+	// calls turns any re-entry from Euroscope into a self deadlock.
+	std::unordered_map<std::string, Stand> stands;
+	{
+		std::lock_guard<std::mutex> lock(standsCacheMutex_);
+		stands = standsCache_;
+	}
+
+	std::unordered_map<std::string, AnnotationWrite> attempted;
+
 	CRadarTarget rt = this->RadarTargetSelectFirst();
 	while (rt.IsValid()) {
-		bool isOnGround = rt.IsValid() && rt.GetGS() <= ON_GROUND_SPEED_THRESHOLD; // Only update strip if target is on the ground
-		if (!isOnGround) {
+		const std::string callsign = SafeString(rt.GetCallsign());
+
+		// Only update strip if target is on the ground
+		if (callsign.empty() || rt.GetGS() > ON_GROUND_SPEED_THRESHOLD) {
 			rt = this->RadarTargetSelectNext(rt);
 			continue;
 		}
-
 
 		CFlightPlan fp = rt.GetCorrelatedFlightPlan();
 		if (fp.IsValid() == false) {
@@ -456,26 +542,50 @@ void rampAgent::RampAgent::UpdateFlightStripAnnotations()
 			continue;
 		}
 
-		bool hasStand = standsCache_.contains(rt.GetCallsign()); // Only update if information available
+		// Empty values clear the annotation when no stand information is available
+		AnnotationWrite desired;
+		if (const auto stand = stands.find(callsign); stand != stands.end()) {
+			desired.stand = stand->second.name.substr(0, MAX_ANNOTATION_LENGTH);
+			desired.remark = stand->second.remark.substr(0, MAX_ANNOTATION_LENGTH);
+		}
+
+		// Euroscope refused these exact values last tick and nothing has changed since,
+		// so asking again would only repeat the same rejection.
+		if (const auto previous = lastAnnotationWrite_.find(callsign);
+			previous != lastAnnotationWrite_.end() && previous->second.rejected &&
+			previous->second.stand == desired.stand && previous->second.remark == desired.remark) {
+			attempted[callsign] = previous->second;
+			rt = this->RadarTargetSelectNext(rt);
+			continue;
+		}
 
 		CFlightPlanControllerAssignedData assignedData = fp.GetControllerAssignedData();
-		const std::string standName = hasStand ? standsCache_[rt.GetCallsign()].name : "";
-		std::string truncatedStand = standName.length() > 23 ? standName.substr(0, 23) : standName; // Truncate to 23 characters to ensure it fits in the annotation field
 
-		// Only update if value different to avoid unnecessary controllerAssignedData updates
-		if (assignedData.GetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX) != truncatedStand) {
-			assignedData.SetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX, truncatedStand.c_str());
-		}
-		
-		const std::string remark = hasStand ? standsCache_[rt.GetCallsign()].remark : "";
-		std::string truncatedRemark = remark.length() > 23 ? remark.substr(0, 23) : remark; // Truncate to 23 characters to ensure it fits in the annotation field
-		// Only update if value different to avoid unnecessary controllerAssignedData updates
-		if (assignedData.GetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX) != truncatedRemark) {
-			assignedData.SetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX, truncatedRemark.c_str());
-		}
+		// Writes only on a difference, so an annotation cleared by anything else is still
+		// restored, but re-reads afterwards rather than trusting the return value:
+		// Euroscope reports success even when it stores less than it was handed, and a
+		// silently truncated value differs again next tick and would be rewritten on
+		// every single one. Treating that as a rejection lets the caller suppress it.
+		const auto writeAnnotation = [&assignedData](int index, const std::string& value) {
+			if (SafeString(assignedData.GetFlightStripAnnotation(index)) == value)
+				return true; // Already correct, nothing to do
+
+			if (assignedData.SetFlightStripAnnotation(index, value.c_str()) == false)
+				return false;
+
+			return SafeString(assignedData.GetFlightStripAnnotation(index)) == value;
+		};
+
+		bool accepted = writeAnnotation(STAND_FLIGHT_STRIP_INDEX, desired.stand);
+		accepted &= writeAnnotation(REMARK_FLIGHT_STRIP_INDEX, desired.remark);
+
+		desired.rejected = !accepted;
+		attempted[callsign] = desired;
 
 		rt = this->RadarTargetSelectNext(rt);
 	}
+
+	lastAnnotationWrite_ = std::move(attempted);
 }
 
 bool RampAgent::IsController()

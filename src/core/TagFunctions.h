@@ -1,4 +1,5 @@
 #include "RampAgent.h"
+#include "Helpers.h"
 
 using namespace rampAgent;
 
@@ -17,17 +18,31 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 	// Check if we're a controller and connected (these are set by OnTimer)
 	//if (!isConnected_.load(std::memory_order_acquire) || !isController_.load(std::memory_order_acquire)) return;
 
+	// vSMR calls into this from its own OnClickScreenObject, and the aircraft it right
+	// clicked may have no flight plan at all, in which case its SetASELAircraft was a
+	// no-op and the selection here is stale or empty.
 	auto fp = FlightPlanSelectASEL();
-	std::string callsign = ToUpper(fp.GetCallsign());
-	std::string icao = ToUpper(fp.GetFlightPlanData().GetDestination());
+	if (fp.IsValid() == false) return;
 
-	std::unordered_map<std::string, std::vector<Stand>> localAirportStandsCache;
+	std::string callsign = ToUpper(SafeString(fp.GetCallsign()));
+	std::string icao = ToUpper(SafeString(fp.GetFlightPlanData().GetDestination()));
+	if (callsign.empty() || icao.empty()) return; // Nothing to assign a stand against
+
+	// Copy just this airport's stands under the lock, rather than the whole cache. Note
+	// find() and not operator[]: the latter inserts an empty entry for an unsupported
+	// ICAO, which can rehash the map while the worker thread is populating it.
+	std::vector<Stand> airportStands;
+	bool airportSupported = false;
 	{
 		std::lock_guard<std::mutex> lock(standsCacheMutex_);
-		localAirportStandsCache = airportStandsCache_;
+		if (const auto airport = airportStandsCache_.find(icao); airport != airportStandsCache_.end()) {
+			airportStands = airport->second;
+			airportSupported = true;
+		}
 	}
 
-	if (!localAirportStandsCache.contains(icao)) {
+	// Reported after the lock is released, since DisplayError calls into Euroscope
+	if (airportSupported == false) {
 		DisplayError(std::format("{} is not supported.", icao));
 		return;
 	}
@@ -37,7 +52,7 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 	{
 		OpenPopupList(area, icao.c_str(), 1);
 
-		for (const auto& stand : airportStandsCache_[icao]) {
+		for (const auto& stand : airportStands) {
 			AddPopupListElement(stand.name.c_str(), NULL, static_cast<int>(TagActionID::AssignStand), false, 2, false, false);
 		}
 		AddPopupListElement("None", NULL, static_cast<int>(TagActionID::AssignStand), false, 2, false, true);
@@ -70,8 +85,7 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 
 		// Handle manual entry
 		bool isStandCorrect = false;
-		std::vector<Stand> standsAtAirport = localAirportStandsCache[icao];
-		for (const auto& stand : standsAtAirport) {
+		for (const auto& stand : airportStands) {
 			if (stand.name == itemString) {
 				isStandCorrect = true;
 				break;
