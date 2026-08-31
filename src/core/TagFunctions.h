@@ -68,11 +68,10 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 
 		// Handle stand freeing
 		if (itemString == std::string("None")) {
-			// Add request to queue that will be processed by worker thread
-			// Clear flight strip annotation immediately for better UX; it will be set again by ES if the API request fails and the stand is still assigned
-			CFlightPlanControllerAssignedData assignedData = fp.GetControllerAssignedData();
-			assignedData.SetFlightStripAnnotation(STAND_FLIGHT_STRIP_INDEX, ""); // Clear the annotation field on the flight strip immediately for better UX
-			assignedData.SetFlightStripAnnotation(REMARK_FLIGHT_STRIP_INDEX, ""); // Clear the annotation field on the flight strip immediately for better UX
+			// Add request to queue that will be processed by worker thread.
+			// Clear the published value immediately for better UX; the next publish sweep
+			// puts it back if the API request fails and the stand is still assigned.
+			ClearBridgeStand(callsign);
 			std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
 			pendingAssignRequests_[callsign] = Stand{ .name = "None", .icao = icao, .remark = ""};
 			return;

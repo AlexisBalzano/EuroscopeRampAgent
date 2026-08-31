@@ -1,3 +1,10 @@
+// Exactly one translation unit defines the shim (INTEGRATION.md A2): it carries file
+// static attach state, so a second definition would mean a second, separately attached
+// copy. Must come before anything else pulls in esbridge.h, since the shim block sits
+// inside the header's own include guard.
+#define ESB_CLIENT_SHIM
+#include <esbridge.h>
+
 #include <numeric>
 #include <algorithm>
 #include <limits>
@@ -85,6 +92,14 @@ void RampAgent::Shutdown()
 	// Wait for worker thread to finish
 	if (m_thread.joinable())
 		m_thread.join();
+
+	// Mandatory (A10). A provider left registered after its DLL unloads is exactly the
+	// dangling-module case the bridge's reaping exists to catch, and relying on being
+	// caught is not a plan. No subscriptions to release: this plugin only publishes.
+	if (esb_api != nullptr && bridgeProvider_ != nullptr) {
+		esb_api->unregister_provider(bridgeProvider_);
+		bridgeProvider_ = nullptr;
+	}
 
 	// Deliberately silent. Shutdown only runs from ~RampAgent, itself reached from
 	// EuroScopePlugInExit, so DisplayUserMessage here calls into Euroscope while it is
@@ -494,8 +509,9 @@ void RampAgent::OnTimer(int Counter) {
 		messageQueue_.clear();
 	}
 
-	// Update flight strip annotations (done here to be independant from tag items)
-	UpdateFlightStripAnnotations();
+	// Publish stand data over the bridge (done here to be independant from tag items, and
+	// because the bridge ABI may only be called from the main thread)
+	PublishStandsToBridge();
 }
 
 bool RampAgent::IsConnected()
@@ -504,88 +520,136 @@ bool RampAgent::IsConnected()
 	return userIsConnected;
 }
 
-void rampAgent::RampAgent::UpdateFlightStripAnnotations()
+bool RampAgent::RegisterBridgeProvider(const ESB_Api_v1* api)
 {
-	// Writing controller assigned data needs an active controller connection. Without one
-	// SetFlightStripAnnotation fails and leaves the annotation untouched, so the "value
-	// differs" guard below stays true and every on ground aircraft is retried every tick.
-	if (isConnected_.load(std::memory_order_acquire) == false ||
-		isController_.load(std::memory_order_acquire) == false) {
-		lastAnnotationWrite_.clear(); // Start clean on the next connection
+	// The doc strings are what ".esb schema rampagent" prints, and in practice the only
+	// documentation a consumer will read (B1.3).
+	static const ESB_FieldDecl fields[] = {
+		{ BRIDGE_STAND_FIELD, ESB_T_STR, ESB_SCOPE_AIRCRAFT, 0, BRIDGE_STAND_MAX_BYTES,
+		  "Stand assigned by the Ramp Agent service, empty when none is held" },
+		{ BRIDGE_REMARK_FIELD, ESB_T_STR, ESB_SCOPE_AIRCRAFT, 0, BRIDGE_REMARK_MAX_BYTES,
+		  "Free text remark attached to that stand assignment" },
+	};
+
+	ESB_ProviderDecl decl = {};
+	decl.struct_size = sizeof decl;
+	decl.provider_id = BRIDGE_PROVIDER_ID;
+	decl.schema_major = 1;
+	decl.schema_minor = 0;
+	decl.display_name = "Ramp Agent";
+	decl.contact = "https://github.com/AlexisBalzano/EuroscopeRampAgent";
+	decl.fields = fields;
+	decl.field_count = static_cast<uint32_t>(std::size(fields));
+	decl.module = ESB_SelfModule(); // Never GetModuleHandleA by name: users rename DLLs (A9)
+
+	const ESB_Status status = api->register_provider(&decl, &bridgeProvider_);
+	if (status != ESB_OK) {
+		bridgeProvider_ = nullptr;
+
+		// A taken id is a conflict to settle with the other author, not a condition to
+		// retry around (B1.6), so say it once and stop attempting.
+		if (status == ESB_E_PROVIDER_TAKEN) {
+			bridgeProviderConflict_ = true;
+			DisplayError("Another loaded plugin already owns the \"" +
+				std::string(BRIDGE_PROVIDER_ID) + "\" bridge provider id. Stand data will not be published.");
+		}
+		return false;
+	}
+
+	// Resolved once and cached; never called from the publish loop (B1.7)
+	if (api->own_field(bridgeProvider_, BRIDGE_STAND_FIELD, &bridgeStandField_) != ESB_OK ||
+		api->own_field(bridgeProvider_, BRIDGE_REMARK_FIELD, &bridgeRemarkField_) != ESB_OK) {
+		api->unregister_provider(bridgeProvider_);
+		bridgeProvider_ = nullptr;
+		bridgeStandField_ = ESB_FIELD_NONE;
+		bridgeRemarkField_ = ESB_FIELD_NONE;
+		return false;
+	}
+
+	return true;
+}
+
+void RampAgent::PublishStandsToBridge()
+{
+	if (bridgeProviderConflict_) return;
+
+	// Attached from OnTimer rather than the constructor (A4): Euroscope's plugin load
+	// order follows the user's settings file, so the bridge may legitimately load after
+	// us. Cheap once attached - a single pointer test.
+	const ESB_Api_v1* api = ESB_Attach();
+	if (api == nullptr) {
+		// One message, once, using the shared wording so a user running several
+		// bridge-aware plugins is told the same thing once rather than three ways (A7).
+		if (++bridgeMissingTicks_ == BRIDGE_MISSING_TICKS_BEFORE_WARNING)
+			DisplayError(ESB_MISSING_MESSAGE);
 		return;
 	}
 
-	// Snapshot the cache and release the lock before calling into Euroscope. OnGetTagItem
-	// takes this same non-recursive mutex on this same thread, so holding it across SDK
-	// calls turns any re-entry from Euroscope into a self deadlock.
+	if (bridgeProvider_ == nullptr && RegisterBridgeProvider(api) == false)
+		return;
+
+	// The worker thread must never touch the bridge (A8), so the cache is snapshotted
+	// here on the main thread and published from the copy. Same rule as the Euroscope
+	// SDK: take the lock, copy, release, then call out.
 	std::unordered_map<std::string, Stand> stands;
 	{
 		std::lock_guard<std::mutex> lock(standsCacheMutex_);
 		stands = standsCache_;
 	}
 
-	std::unordered_map<std::string, AnnotationWrite> attempted;
-
+	// Swept over radar targets rather than over the cache, because an aircraft losing its
+	// stand needs its published value cleared, and that aircraft is by definition absent
+	// from the cache. No ground speed filter: that existed to spare Euroscope needless
+	// assigned data writes, and an arrival's stand is worth showing before it lands.
 	CRadarTarget rt = this->RadarTargetSelectFirst();
 	while (rt.IsValid()) {
 		const std::string callsign = SafeString(rt.GetCallsign());
-
-		// Only update strip if target is on the ground
-		if (callsign.empty() || rt.GetGS() > ON_GROUND_SPEED_THRESHOLD) {
+		if (callsign.empty()) {
 			rt = this->RadarTargetSelectNext(rt);
 			continue;
 		}
 
-		CFlightPlan fp = rt.GetCorrelatedFlightPlan();
-		if (fp.IsValid() == false) {
-			rt = this->RadarTargetSelectNext(rt);
+		// Resolved from the callsign every sweep rather than cached, so a reconnection
+		// can never leave us writing through a stale handle (B2.9).
+		ESB_Aircraft ac = ESB_AIRCRAFT_NONE;
+		if (api->aircraft(callsign.c_str(), &ac) != ESB_OK) {
+			rt = this->RadarTargetSelectNext(rt); // Bridge has not seen this one yet
 			continue;
 		}
 
-		// Empty values clear the annotation when no stand information is available
-		AnnotationWrite desired;
+		// No dirty tracking on purpose (B1.9): the bridge compares before storing, so
+		// republishing an unchanged value costs nothing and notifies nobody.
 		if (const auto stand = stands.find(callsign); stand != stands.end()) {
-			desired.stand = stand->second.name.substr(0, MAX_ANNOTATION_LENGTH);
-			desired.remark = stand->second.remark.substr(0, MAX_ANNOTATION_LENGTH);
+			// Clamped to the declared caps: the bridge rejects an over-long write outright
+			// rather than trimming it, which would leave the consumer with nothing at all.
+			// ESB_Str borrows the buffer, so these locals must outlive the set_ac call.
+			const std::string name = stand->second.name.substr(0, BRIDGE_STAND_MAX_BYTES);
+			const std::string remark = stand->second.remark.substr(0, BRIDGE_REMARK_MAX_BYTES);
+
+			ESB_Value nameValue = ESB_Str(name.c_str());
+			api->set_ac(bridgeProvider_, ac, bridgeStandField_, &nameValue);
+
+			ESB_Value remarkValue = ESB_Str(remark.c_str());
+			api->set_ac(bridgeProvider_, ac, bridgeRemarkField_, &remarkValue);
 		}
-
-		// Euroscope refused these exact values last tick and nothing has changed since,
-		// so asking again would only repeat the same rejection.
-		if (const auto previous = lastAnnotationWrite_.find(callsign);
-			previous != lastAnnotationWrite_.end() && previous->second.rejected &&
-			previous->second.stand == desired.stand && previous->second.remark == desired.remark) {
-			attempted[callsign] = previous->second;
-			rt = this->RadarTargetSelectNext(rt);
-			continue;
+		else {
+			api->clear_ac(bridgeProvider_, ac, bridgeStandField_);
+			api->clear_ac(bridgeProvider_, ac, bridgeRemarkField_);
 		}
-
-		CFlightPlanControllerAssignedData assignedData = fp.GetControllerAssignedData();
-
-		// Writes only on a difference, so an annotation cleared by anything else is still
-		// restored, but re-reads afterwards rather than trusting the return value:
-		// Euroscope reports success even when it stores less than it was handed, and a
-		// silently truncated value differs again next tick and would be rewritten on
-		// every single one. Treating that as a rejection lets the caller suppress it.
-		const auto writeAnnotation = [&assignedData](int index, const std::string& value) {
-			if (SafeString(assignedData.GetFlightStripAnnotation(index)) == value)
-				return true; // Already correct, nothing to do
-
-			if (assignedData.SetFlightStripAnnotation(index, value.c_str()) == false)
-				return false;
-
-			return SafeString(assignedData.GetFlightStripAnnotation(index)) == value;
-		};
-
-		bool accepted = writeAnnotation(STAND_FLIGHT_STRIP_INDEX, desired.stand);
-		accepted &= writeAnnotation(REMARK_FLIGHT_STRIP_INDEX, desired.remark);
-
-		desired.rejected = !accepted;
-		attempted[callsign] = desired;
 
 		rt = this->RadarTargetSelectNext(rt);
 	}
+}
 
-	lastAnnotationWrite_ = std::move(attempted);
+void RampAgent::ClearBridgeStand(const std::string& callsign)
+{
+	if (esb_api == nullptr || bridgeProvider_ == nullptr || callsign.empty()) return;
+
+	ESB_Aircraft ac = ESB_AIRCRAFT_NONE;
+	if (esb_api->aircraft(callsign.c_str(), &ac) != ESB_OK) return;
+
+	esb_api->clear_ac(bridgeProvider_, ac, bridgeStandField_);
+	esb_api->clear_ac(bridgeProvider_, ac, bridgeRemarkField_);
 }
 
 bool RampAgent::IsController()
