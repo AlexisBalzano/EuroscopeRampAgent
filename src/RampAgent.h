@@ -7,6 +7,7 @@
 #include <string>
 #include <nlohmann/json.hpp>
 #include <mutex>
+#include <esbridge.h>
 
 using namespace EuroScopePlugIn;
 
@@ -26,15 +27,6 @@ namespace rampAgent {
 		COLORREF color;
 	};
 
-	// What UpdateFlightStripAnnotations last pushed for a callsign. Euroscope rejecting a
-	// write leaves the annotation unchanged, so without remembering the attempt the
-	// "value differs" guard stays true and we retry it on every single tick.
-	struct AnnotationWrite {
-		std::string stand;
-		std::string remark;
-		bool rejected = false;
-	};
-
 	enum TagItemID : int {
 		STAND = 0,
 		REMARK,
@@ -49,17 +41,23 @@ namespace rampAgent {
 	class RampAgent : public EuroScopePlugIn::CPlugIn
 	{
 		static constexpr int PERIODIC_FETCH_TIME_INTERVAL = 10; // seconds
-		static constexpr int ON_GROUND_SPEED_THRESHOLD = 70; // kts
-		static constexpr int STAND_FLIGHT_STRIP_INDEX = 3;
-		static constexpr int REMARK_FLIGHT_STRIP_INDEX = 4;
-		// The SDK documents no maximum for SetFlightStripAnnotation and the previous 23
-		// had no stated source. 15 is the SDK's own budget for plugin supplied tag text
-		// (OnGetTagItem's char sItemString[16]) and is already what TagItem.h truncates
-		// to, so both output paths now agree on one documented number. The write is also
-		// verified in UpdateFlightStripAnnotations, so a shorter real limit gets detected
-		// rather than assumed away.
-		static constexpr size_t MAX_ANNOTATION_LENGTH = 15;
 		static constexpr const char* API_URL = "rampagent.vatsim.fr";
+
+		// EuroScope Plugin Bridge. Stand data reaches vSMR through the bridge rather than
+		// flight strip annotations 3/4, so nothing is laundered through Euroscope's
+		// assigned data and nothing contends with UK Controller Plugin for index 3.
+		// Values are published untruncated: the 15 character ceiling was a property of the
+		// annotation slot, not of the data.
+		static constexpr const char* BRIDGE_PROVIDER_ID = "rampagent";
+		static constexpr const char* BRIDGE_STAND_FIELD = "stand";
+		static constexpr const char* BRIDGE_REMARK_FIELD = "remark";
+		// max_bytes is a hard cap the bridge enforces on write, not a truncation: an
+		// over-long value would be rejected outright and the consumer would see nothing
+		// at all. Set generously, and clamped again before publishing so an unexpectedly
+		// long name degrades to a clipped one rather than disappearing.
+		static constexpr uint32_t BRIDGE_STAND_MAX_BYTES = 32;
+		static constexpr uint32_t BRIDGE_REMARK_MAX_BYTES = 128;
+		static constexpr int BRIDGE_MISSING_TICKS_BEFORE_WARNING = 10; // INTEGRATION.md A7
 
 	public:
 		RampAgent();
@@ -91,7 +89,12 @@ namespace rampAgent {
 	private:
 		bool IsController();
 		bool IsConnected();
-		void UpdateFlightStripAnnotations();
+
+		// Bridge publishing. Main thread only - the bridge ABI requires it (A8), so the
+		// worker never touches any of this and the stand cache is snapshotted instead.
+		void PublishStandsToBridge();
+		bool RegisterBridgeProvider(const ESB_Api_v1* api);
+		void ClearBridgeStand(const std::string& callsign);
 
 		void WorkerThread();
 		void FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std::string& userCallsign);
@@ -129,9 +132,13 @@ namespace rampAgent {
 		std::unordered_map<std::string, Stand> standsCache_; // Callsign -> Stand info
 		std::unordered_map<std::string, std::vector<Stand>> airportStandsCache_; // ICAO -> List of stands at the airport
 
-		// Flight strip annotation state. Touched only from OnTimer on the main thread, so
-		// it needs no mutex. Rebuilt on every sweep, so departed aircraft drop out.
-		std::unordered_map<std::string, AnnotationWrite> lastAnnotationWrite_; // Callsign -> last attempted write
+		// Bridge state. Main thread only, so no mutex. The provider handle is the write
+		// authority; the field ids are resolved once and cached (B1.7).
+		ESB_Provider* bridgeProvider_ = nullptr;
+		ESB_FieldId bridgeStandField_ = ESB_FIELD_NONE;
+		ESB_FieldId bridgeRemarkField_ = ESB_FIELD_NONE;
+		int bridgeMissingTicks_ = 0;
+		bool bridgeProviderConflict_ = false; // Another module owns "rampagent"; stop retrying
 
 		// API request management
 		std::mutex apiRequestQueueMutex_;
