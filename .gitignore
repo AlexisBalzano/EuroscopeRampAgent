@@ -14,6 +14,7 @@ Secret.h
 
 #ignore build directories
 out/
+build/
 
 # Compiled Object files
 *.slo
