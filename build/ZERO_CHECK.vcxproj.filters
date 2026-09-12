@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\DEV\EuroscopeRampAgent\build\CMakeFiles\be2903275da5409f3ef9585bfb46134f\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{C824DC8A-DD95-305D-B44B-DC6BA6FC02DE}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -516,7 +516,7 @@ void RampAgent::OnTimer(int Counter) {
 
 bool RampAgent::IsConnected()
 {
-	bool userIsConnected = this->GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_DIRECT;
+	bool userIsConnected = this->GetConnectionType() != EuroScopePlugIn::CONNECTION_TYPE_NO;
 	return userIsConnected;
 }
 
