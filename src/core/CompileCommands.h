@@ -48,6 +48,7 @@ inline bool RampAgent::OnCompileCommand(const char* sCommandLine)
 		return true;
 	}
 
+	// Keep in sync with kNeoChatCommands in RampAgent.cpp
 	DisplayMessage("Commands: .rampAgent version");
 	return true;
 }

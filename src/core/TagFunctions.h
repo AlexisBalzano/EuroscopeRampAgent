@@ -18,6 +18,13 @@ inline void RampAgent::OnFunctionCall(int functionId, const char* itemString, PO
 	// Check if we're a controller and connected (these are set by OnTimer)
 	//if (!isConnected_.load(std::memory_order_acquire) || !isController_.load(std::memory_order_acquire)) return;
 
+	// The API is disabled outside live VATSIM, so there is nothing to show or assign
+	if (serverDetector_.IsSweatbox()) {
+		DisplayMessage("Ramp Agent is disabled on Sweatbox connections.");
+		return;
+	}
+	if (serverDetector_.IsPending()) return; // Detection takes under a second; just ignore the click
+
 	// vSMR calls into this from its own OnClickScreenObject, and the aircraft it right
 	// clicked may have no flight plan at all, in which case its SetASELAircraft was a
 	// no-op and the selection here is stale or empty.

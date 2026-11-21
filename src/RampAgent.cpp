@@ -21,6 +21,7 @@
 #include "core/CompileCommands.h"
 #include "core/TagFunctions.h"
 #include "Secret.h"
+#include <NeoChatClient.h> // Needs <windows.h> and EuroScopePlugIn.h first (via RampAgent.h)
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -29,9 +30,18 @@ using namespace EuroScopePlugIn;
 
 std::unique_ptr<rampAgent::RampAgent> myPluginInstance = nullptr;
 
+namespace {
+	// Dot-commands advertised to NeoChat for autocomplete. Keep in sync with OnCompileCommand.
+	const std::vector<const char*> kNeoChatCommands = {
+		".rampagent",
+		".rampagent version",
+	};
+}
+
 RampAgent::RampAgent() : CPlugIn(EuroScopePlugIn::COMPATIBILITY_CODE, "RampAgent", PLUGIN_VERSION, "French vACC", "Open Source")
 {
 	m_stop.store(false, std::memory_order_relaxed);
+	serverDetector_.SetOnChange([this](const essd::ServerInfo& info) { OnServerChange(info); });
 	Initialize();
 };
 RampAgent::~RampAgent()
@@ -100,6 +110,9 @@ void RampAgent::Shutdown()
 		esb_api->unregister_provider(bridgeProvider_);
 		bridgeProvider_ = nullptr;
 	}
+
+	// Only calls into NeoChat (if still loaded), never into Euroscope, so safe on unload
+	NeoChat::UnregisterCommands(kNeoChatCommands);
 
 	// Deliberately silent. Shutdown only runs from ~RampAgent, itself reached from
 	// EuroScopePlugInExit, so DisplayUserMessage here calls into Euroscope while it is
@@ -285,6 +298,10 @@ void RampAgent::FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std:
 		}
 		
 		std::lock_guard<std::mutex> lock(standsCacheMutex_);
+		// Dropped if we left live VATSIM while the request was in flight, so a Sweatbox
+		// session never shows stands fetched just before the switch. Tested under the lock:
+		// OnServerChange clears the flag before taking it, so the two cannot interleave.
+		if (isConnected_.load(std::memory_order_acquire) == false) return;
 		standsCache_ = std::move(standTagMap);
 	}
 	catch (const nlohmann::json::exception& e) {
@@ -493,11 +510,19 @@ void RampAgent::SendStandAssignementRequest(httplib::SSLClient& cli, const std::
 }
 
 void RampAgent::OnTimer(int Counter) {
-	// Update user state
+	// First, so everything below sees this tick's network. Non-blocking: the socket scan
+	// and DNS lookups run on ServerDetect's own worker. May fire OnServerChange.
+	serverDetector_.Update(GetConnectionType());
+
+	// Update user state. Both gate the worker's API traffic, so both require live VATSIM.
 	bool connected = IsConnected();
 	isConnected_.store(connected, std::memory_order_release);
-	bool controller = IsController();
+	bool controller = IsController() && IsApiAllowed();
 	isController_.store(controller, std::memory_order_release);
+
+	// Idempotent and cheap; repeated so it survives NeoChat loading after us or reloading
+	if (Counter % NEOCHAT_REGISTER_INTERVAL == 0)
+		NeoChat::RegisterCommands(kNeoChatCommands);
 	
 	// Display queued messages from worker thread
 	{
@@ -516,8 +541,40 @@ void RampAgent::OnTimer(int Counter) {
 
 bool RampAgent::IsConnected()
 {
-	bool userIsConnected = this->GetConnectionType() != EuroScopePlugIn::CONNECTION_TYPE_NO;
-	return userIsConnected;
+	// GetConnectionType() alone reports DIRECT for a student on Sweatbox with "Connect to
+	// VATSIM" ticked, so ask ServerDetect for the real server. Offline and Simulator are
+	// never VATSIM either, so this covers the plain "not connected" case too.
+	return IsApiAllowed();
+}
+
+void RampAgent::OnServerChange(const essd::ServerInfo& info)
+{
+	// Called from serverDetector_.Update() in OnTimer, i.e. on the main thread
+	if (info.network != essd::Network::Vatsim) {
+		// Drop anything fetched or queued while on live VATSIM: the bridge sweep then clears
+		// the published stands, and no request reaches the server from a training session.
+		// The flags are cleared first so the worker stops before the caches are emptied.
+		isConnected_.store(false, std::memory_order_release);
+		isController_.store(false, std::memory_order_release);
+		{
+			std::lock_guard<std::mutex> lock(standsCacheMutex_);
+			standsCache_.clear();
+		}
+		{
+			std::lock_guard<std::mutex> lock(apiRequestQueueMutex_);
+			pendingAssignRequests_.clear();
+		}
+	}
+
+	if (info.network == essd::Network::Sweatbox) {
+		std::string server = info.serverName.empty() ? info.remoteIp : info.serverName;
+		if (info.fromFallback) server = "detection fallback";
+		DisplayMessage("Sweatbox connection detected" + (server.empty() ? std::string() : " (" + server + ")") +
+			": Ramp Agent is disabled for this session.");
+	}
+	else if (info.network == essd::Network::Vatsim && info.fromFallback) {
+		DisplayMessage("Could not confirm the server, assuming live VATSIM: Ramp Agent enabled.");
+	}
 }
 
 bool RampAgent::RegisterBridgeProvider(const ESB_Api_v1* api)

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake)
 SET(VCPKG_TARGET_TRIPLET "x86-windows-static" CACHE STRING "")
-project(RampAgent VERSION "2.0.4")
+project(RampAgent VERSION "2.0.5")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -66,6 +66,7 @@ include_directories(
 # Source files
 set(SOURCES
     src/RampAgent.cpp
+    src/ServerDetect.cpp
 )
 
 # Define the plugin library (create target before using target_*
@@ -102,6 +103,8 @@ target_include_directories(EuroScopePluginDLL INTERFACE
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/External/httplib
     ${CMAKE_SOURCE_DIR}/External/esbridge
+    ${CMAKE_SOURCE_DIR}/External/neochat
+    ${CMAKE_SOURCE_DIR}/External/serverdetect
     ${CMAKE_SOURCE_DIR}/External/EuroScopeSDK/include
 )
 target_compile_definitions(${PROJECT_NAME} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)

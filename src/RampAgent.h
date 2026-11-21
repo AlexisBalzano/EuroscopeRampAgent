@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include <mutex>
 #include <esbridge.h>
+#include <esserverdetect.h>
 
 using namespace EuroScopePlugIn;
 
@@ -58,6 +59,7 @@ namespace rampAgent {
 		static constexpr uint32_t BRIDGE_STAND_MAX_BYTES = 32;
 		static constexpr uint32_t BRIDGE_REMARK_MAX_BYTES = 128;
 		static constexpr int BRIDGE_MISSING_TICKS_BEFORE_WARNING = 10; // INTEGRATION.md A7
+		static constexpr int NEOCHAT_REGISTER_INTERVAL = 5; // OnTimer ticks between NeoChat command registrations
 
 	public:
 		RampAgent();
@@ -96,6 +98,12 @@ namespace rampAgent {
 		bool RegisterBridgeProvider(const ESB_Api_v1* api);
 		void ClearBridgeStand(const std::string& callsign);
 
+		// Server detection. The Ramp Agent API holds live VATSIM data, so it is only used
+		// once ServerDetect confirms the AUTOMATIC server: never on Sweatbox, and not while
+		// detection is still Pending. Main thread only.
+		void OnServerChange(const essd::ServerInfo& info);
+		bool IsApiAllowed() const { return serverDetector_.IsVatsim(); }
+
 		void WorkerThread();
 		void FetchAndUpdateAssignedStands(httplib::SSLClient& cli, const std::string& userCallsign);
 		bool PopulateICAOStandMap(httplib::SSLClient& cli); // True once every compatible airport is cached
@@ -126,6 +134,9 @@ namespace rampAgent {
 		std::atomic<bool> isController_ = false;
 		std::atomic<bool> isConnected_ = false;
 		std::string userCallsign_;
+
+		// Real server (VATSIM vs Sweatbox), fed from OnTimer. Main thread only.
+		essd::ServerDetector serverDetector_;
 
 		// Stand data cache
 		std::mutex standsCacheMutex_;
