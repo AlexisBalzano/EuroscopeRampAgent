@@ -567,13 +567,15 @@ void RampAgent::OnServerChange(const essd::ServerInfo& info)
 	}
 
 	if (info.network == essd::Network::Sweatbox) {
-		std::string server = info.serverName.empty() ? info.remoteIp : info.serverName;
-		if (info.fromFallback) server = "detection fallback";
+		std::string server = info.fromFallback
+			? "EuroScope connection type"
+			: info.serverName + " " + info.remoteIp + ", via " + essd::ToString(info.source);
 		DisplayMessage("Sweatbox connection detected" + (server.empty() ? std::string() : " (" + server + ")") +
 			": Ramp Agent is disabled for this session.");
 	}
 	else if (info.network == essd::Network::Vatsim && info.fromFallback) {
-		DisplayMessage("Could not confirm the server, assuming live VATSIM: Ramp Agent enabled.");
+		DisplayMessage(std::string("Could not identify the server") +
+			(info.remoteIp.empty() ? "" : " " + info.remoteIp) + ", assuming live VATSIM: Ramp Agent enabled.");
 	}
 }
 
